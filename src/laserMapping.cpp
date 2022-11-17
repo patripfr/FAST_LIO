@@ -52,9 +52,11 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/NavSatFix.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
 #include <geometry_msgs/Vector3.h>
+#include <geometry_msgs/TwistWithCovarianceStamped.h>
 #include <livox_ros_driver/CustomMsg.h>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
@@ -81,10 +83,10 @@ mutex mtx_buffer;
 condition_variable sig_buffer;
 
 string root_dir = ROOT_DIR;
-string map_file_path, lid_topic, imu_topic;
+string map_file_path, lid_topic, imu_topic, gps_topic, gps_vel_topic;
 
 double res_mean_last = 0.05, total_residual = 0.0;
-double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
+double last_timestamp_lidar = 0, last_timestamp_imu = -1.0, last_timestamp_gps = -1.0, last_timestamp_gps_vel = -1;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
@@ -103,6 +105,8 @@ vector<double>       extrinR(9, 0.0);
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
+deque<sensor_msgs::NavSatFixConstPtr> gps_buffer;
+deque<geometry_msgs::TwistWithCovarianceStampedPtr> gps_vel_buffer;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -146,6 +150,10 @@ Eigen::MatrixXd cov;
 bool init = false;
 Eigen::Quaterniond grav_q;
 std::string imu_frame;
+std::string gps_frame;
+std::string gps_vel_frame;
+
+
 bool grav_align = false;
 bool pub_cov = false;
 Eigen::Vector3d last_pos;
@@ -376,6 +384,79 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     imu_buffer.push_back(msg);
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+}
+
+double timediff_gps_wrt_imu = 0.0;
+bool   timediff_gps_set_flg = false;
+
+void gps_cbk(const sensor_msgs::NavSatFix::ConstPtr &msg_in)
+{
+    if (gps_frame.empty()) {
+      gps_frame = msg_in->header.frame_id;
+    }
+
+    cout<<"GPS got at: "<<msg_in->header.stamp.toSec()<<endl;
+    sensor_msgs::NavSatFix::Ptr msg(new sensor_msgs::NavSatFix(*msg_in));
+
+    /* TODO: Introduce time sync
+    if (abs(timediff_gps_wrt_imu) > 0.1 && time_sync_en)
+    {
+        msg->header.stamp = \
+        ros::Time().fromSec(timediff_gps_wrt_imu + msg_in->header.stamp.toSec());
+    }
+    */
+
+    double timestamp = msg->header.stamp.toSec();
+
+    mtx_buffer.lock();
+
+    if (timestamp < last_timestamp_gps)
+    {
+        ROS_WARN("GPS loop back, clear buffer");
+        gps_buffer.clear();
+    }
+
+    last_timestamp_gps = timestamp;
+
+    gps_buffer.push_back(msg);
+    mtx_buffer.unlock();
+    sig_buffer.notify_all();
+}
+
+double timediff_gps_vel_wrt_imu = 0.0;
+bool   timediff_gps_vel_set_flg = false;
+
+void gps_vel_cbk(const geometry_msgs::TwistWithCovarianceStamped::ConstPtr &msg_in)
+{
+    if (gps_vel_frame.empty()) {
+      gps_vel_frame = msg_in->header.frame_id;
+    }
+    publish_count ++;
+    cout<<"GPS_vel got at: "<<msg_in->header.stamp.toSec()<<endl;
+    geometry_msgs::TwistWithCovarianceStamped::Ptr msg(new geometry_msgs::TwistWithCovarianceStamped(*msg_in));
+
+    if (abs(timediff_gps_vel_wrt_imu) > 0.1 && time_sync_en)
+    {
+        msg->header.stamp = \
+        ros::Time().fromSec(timediff_gps_vel_wrt_imu + msg_in->header.stamp.toSec());
+    }
+
+    double timestamp = msg->header.stamp.toSec();
+
+    mtx_buffer.lock();
+
+    if (timestamp < last_timestamp_gps_vel)
+    {
+        ROS_WARN("imu loop back, clear buffer");
+        gps_vel_buffer.clear();
+    }
+
+    last_timestamp_gps_vel = timestamp;
+
+    gps_vel_buffer.push_back(msg);
+    mtx_buffer.unlock();
+    sig_buffer.notify_all();
+
 }
 
 double lidar_mean_scantime = 0.0;
@@ -904,6 +985,9 @@ int main(int argc, char** argv)
     nh.param<string>("map_file_path",map_file_path,"");
     nh.param<string>("common/lid_topic",lid_topic,"/livox/lidar");
     nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
+    nh.param<string>("common/gps_topic", gps_topic, "gps");
+    nh.param<string>("common/gps_vel_topic", gps_vel_topic, "gps_vel");
+
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
     nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);
     nh.param<double>("filter_size_surf",filter_size_surf_min,0.5);
@@ -982,6 +1066,9 @@ int main(int argc, char** argv)
     ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>
             ("/Odometry", 100000);
     ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
+    ros::Subscriber sub_gps = nh.subscribe(gps_topic, 200000, gps_cbk);
+    ros::Subscriber sub_gps_vel = nh.subscribe(gps_vel_topic, 200000, gps_vel_cbk);
+
     ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>
             ("/cloud_registered", 100000);
     ros::Publisher pubLaserCloudFull_body = nh.advertise<sensor_msgs::PointCloud2>
@@ -1131,7 +1218,7 @@ int main(int argc, char** argv)
               }
               const Eigen::MatrixXd evecr = eigenr.eigenvectors().real();
               cov_r = evecr * diagr * evecr.transpose();
-              cov_r = cov_r / sqrt(evalr(0));
+              cov_r = cov_r / sqrt(evalr(0)); 
             }
 
             const double eig_time =  omp_get_wtime() - start_eig;
