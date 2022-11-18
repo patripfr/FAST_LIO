@@ -60,6 +60,7 @@
 #include <livox_ros_driver/CustomMsg.h>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
+#include <geodetic_utils/geodetic_conv.hpp>
 #include <maplab_msgs/OdometryWithImuBiases.h>
 
 #define INIT_TIME           (0.1)
@@ -102,11 +103,15 @@ vector<BoxPointType> cub_needrm;
 vector<PointVector>  Nearest_Points;
 vector<double>       extrinT(3, 0.0);
 vector<double>       extrinR(9, 0.0);
+vector<double>       gpsExtrinT(3, 0.0);
+vector<double>       gpsExtrinR(9, 0.0);
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
-deque<sensor_msgs::NavSatFixConstPtr> gps_buffer;
-deque<geometry_msgs::TwistWithCovarianceStampedPtr> gps_vel_buffer;
+//deque<sensor_msgs::NavSatFixConstPtr> gps_buffer;
+sensor_msgs::NavSatFixConstPtr latest_gnss;
+//deque<geometry_msgs::TwistWithCovarianceStampedPtr> gps_vel_buffer;
+geometry_msgs::TwistWithCovarianceStampedPtr latest_gnss_vel;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -121,6 +126,13 @@ pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
 
 KD_TREE<PointType> ikdtree;
+geodetic_converter::GeodeticConverter g_geodetic_converter;
+V3D GPS_T_wrt_IMU(Zero3d);
+M3D GPS_R_wrt_IMU(Eye3d);
+M3D R_ENU_GLOBAL(Eye3d); // for now we assume the global frame to be aligned with the ENU frame
+
+V3D p_gps;
+V3D v_gps;
 
 V3F XAxisPoint_body(LIDAR_SP_LEN, 0.0, 0.0);
 V3F XAxisPoint_world(LIDAR_SP_LEN, 0.0, 0.0);
@@ -386,6 +398,22 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     sig_buffer.notify_all();
 }
 
+void publishGnssTF(){
+  g_geodetic_converter.geodetic2Enu(latest_gnss->latitude,
+      latest_gnss->longitude, latest_gnss->altitude, &p_gps(0), &p_gps(1), &p_gps(2));
+
+  static tf::TransformBroadcaster br;
+  tf::Transform                   transform;
+  transform.setOrigin(tf::Vector3(p_gps(0), p_gps(1), p_gps(2)));
+  tf::Quaternion                  q;
+    q.setW(0);
+    q.setX(0);
+    q.setY(0);
+    q.setZ(1);
+  transform.setRotation( q );
+  br.sendTransform( tf::StampedTransform(transform, latest_gnss->header.stamp, "odom", "gnss" ) );
+}
+
 double timediff_gps_wrt_imu = 0.0;
 bool   timediff_gps_set_flg = false;
 
@@ -395,7 +423,7 @@ void gps_cbk(const sensor_msgs::NavSatFix::ConstPtr &msg_in)
       gps_frame = msg_in->header.frame_id;
     }
 
-    cout<<"GPS got at: "<<msg_in->header.stamp.toSec()<<endl;
+    //cout<<"GPS got at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::NavSatFix::Ptr msg(new sensor_msgs::NavSatFix(*msg_in));
 
     /* TODO: Introduce time sync
@@ -406,6 +434,14 @@ void gps_cbk(const sensor_msgs::NavSatFix::ConstPtr &msg_in)
     }
     */
 
+    // now the reference just gets set to the first gps message received
+    // TODO: Clarify the initialization -> now ATM we just stick it to the frame
+    if(!g_geodetic_converter.isInitialised() && scan_count > 5) {
+        ROS_INFO_ONCE("GNSS reference set");
+        g_geodetic_converter.initialiseReference(
+            msg_in->latitude, msg_in->longitude, msg_in->altitude);
+        }
+
     double timestamp = msg->header.stamp.toSec();
 
     mtx_buffer.lock();
@@ -413,14 +449,18 @@ void gps_cbk(const sensor_msgs::NavSatFix::ConstPtr &msg_in)
     if (timestamp < last_timestamp_gps)
     {
         ROS_WARN("GPS loop back, clear buffer");
-        gps_buffer.clear();
+        //gps_buffer.clear();
     }
 
     last_timestamp_gps = timestamp;
 
-    gps_buffer.push_back(msg);
+    // gps_buffer.push_back(msg);
+    latest_gnss = msg;
+
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+
+    publishGnssTF();
 }
 
 double timediff_gps_vel_wrt_imu = 0.0;
@@ -447,13 +487,14 @@ void gps_vel_cbk(const geometry_msgs::TwistWithCovarianceStamped::ConstPtr &msg_
 
     if (timestamp < last_timestamp_gps_vel)
     {
-        ROS_WARN("imu loop back, clear buffer");
-        gps_vel_buffer.clear();
+        ROS_WARN("gnss_vel loop back, clear buffer");
+        //gps_vel_buffer.clear();
     }
 
     last_timestamp_gps_vel = timestamp;
 
-    gps_vel_buffer.push_back(msg);
+    //gps_vel_buffer.push_back(msg);
+    latest_gnss_vel = msg;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 
@@ -839,7 +880,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     for (int i = 0; i < feats_down_size; i++)
     {
         PointType &point_body  = feats_down_body->points[i];
-        PointType &point_world = feats_down_world->points[i];
+        PointType &point_world = feats_down_world->points[i]; // world points for registration
 
         /* transform to world frame */
         V3D p_body(point_body.x, point_body.y, point_body.z);
@@ -847,7 +888,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         point_world.x = p_global(0);
         point_world.y = p_global(1);
         point_world.z = p_global(2);
-        point_world.intensity = point_body.intensity;
+        point_world.intensity = point_body.intensity; // transforming measurement point to world
 
         vector<float> pointSearchSqDis(NUM_MATCH_POINTS);
 
@@ -963,11 +1004,45 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         }
 
         /*** Measuremnt: distance to the closest surface/corner ***/
-        ekfom_data.h(i) = -norm_p.intensity;
+        ekfom_data.h(i) = -norm_p.intensity; // here h is the error scale!! And h_x points in the direction of the error!!
 
     }
     solve_time += omp_get_wtime() - solve_start_;
     h_x_cash = temp_h;
+}
+
+void h_share_model_gps(state_ikfom &s, esekfom::dyn_share_datastruct_gps<double> &ekfom_data)
+{
+    double solve_start_ = omp_get_wtime();
+    double update_dim = 6;
+
+    if (!g_geodetic_converter.isInitialised()) {
+        ROS_ERROR("Geodetic converter not initialized");
+        return;
+    }
+
+    g_geodetic_converter.geodetic2Enu(latest_gnss->latitude,
+        latest_gnss->longitude, latest_gnss->altitude, &p_gps(0), &p_gps(1), &p_gps(2));
+
+    v_gps = V3D(latest_gnss_vel->twist.twist.linear.x,
+                latest_gnss_vel->twist.twist.linear.y,
+                latest_gnss_vel->twist.twist.linear.x);
+
+    // *** Computation of Measuremnt Jacobian matrix H and measurents vector ***
+    ekfom_data.h_x = MatrixXd::Zero(update_dim, 6); //2
+    //ekfom_data.h.resize(update_dim);
+
+    ekfom_data.h_x.block<1, 6>(0,0) = MatrixXd::Identity(6,6);
+
+    //temp_h.block<1, 6>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A);
+
+    ekfom_data.h.block<1, 3>(0,0) = p_gps - R_ENU_GLOBAL.transpose() * (s.pos + s.rot * GPS_R_wrt_IMU * GPS_T_wrt_IMU);
+    ekfom_data.h.block<1, 3>(0,0) = v_gps - R_ENU_GLOBAL.transpose() * s.vel;
+
+    // TODO: handle covariances!!
+
+    solve_time += omp_get_wtime() - solve_start_;
+    // h_x_cash = temp_h; // why tmp?
 }
 
 int main(int argc, char** argv)
@@ -1011,6 +1086,9 @@ int main(int argc, char** argv)
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
     nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
+    nh.param<vector<double>>("gps/extrinsic_T", gpsExtrinT, vector<double>());
+    nh.param<vector<double>>("gps/extrinsic_R", gpsExtrinR, vector<double>());
+
     cout<<"p_pre->lidar_type "<<p_pre->lidar_type<<endl;
 
     path.header.stamp    = ros::Time::now();
@@ -1041,9 +1119,13 @@ int main(int argc, char** argv)
     p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
     p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
 
+    GPS_T_wrt_IMU<<VEC_FROM_ARRAY(gpsExtrinT);
+    GPS_R_wrt_IMU<<MAT_FROM_ARRAY(gpsExtrinR);
+
     double epsi[23] = {0.001};
     fill(epsi, epsi+23, 0.001);
-    kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
+    kf.init_dyn_share_multi(get_f, df_dx, df_dw, h_share_model, h_share_model_gps, NUM_MAX_ITERATIONS, epsi);
+    //kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
     /*** debug record ***/
     FILE *fp;
@@ -1116,6 +1198,7 @@ int main(int argc, char** argv)
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
                 ROS_WARN("No point, skip this scan!\n");
+                // Here we could introduce the GPS update?
                 continue;
             }
 
@@ -1153,6 +1236,7 @@ int main(int argc, char** argv)
             if (feats_down_size < 5)
             {
                 ROS_WARN("No point, skip this scan!\n");
+                //kf.update_iterated_dyn_share_modified_gps(MatrixXd::Zero(update_dim, 12), solve_H_time); // here the iterated pose estimate is happening
                 continue;
             }
 
@@ -1218,7 +1302,7 @@ int main(int argc, char** argv)
               }
               const Eigen::MatrixXd evecr = eigenr.eigenvectors().real();
               cov_r = evecr * diagr * evecr.transpose();
-              cov_r = cov_r / sqrt(evalr(0)); 
+              cov_r = cov_r / sqrt(evalr(0));
             }
 
             const double eig_time =  omp_get_wtime() - start_eig;

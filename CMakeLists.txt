@@ -43,6 +43,7 @@ find_package(PythonLibs REQUIRED)
 find_path(MATPLOTLIB_CPP_INCLUDE_DIRS "matplotlibcpp.h")
 
 find_package(catkin REQUIRED COMPONENTS
+  geodetic_utils
   geometry_msgs
   nav_msgs
   sensor_msgs
