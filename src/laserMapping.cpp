@@ -110,10 +110,11 @@ vector<double>       gpsExtrinR(9, 0.0);
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
-//deque<sensor_msgs::NavSatFixConstPtr> gps_buffer;
-sensor_msgs::NavSatFixConstPtr latest_gnss;
-//deque<geometry_msgs::TwistWithCovarianceStampedPtr> gps_vel_buffer;
-geometry_msgs::TwistWithCovarianceStampedPtr latest_gnss_vel;
+// TODO: Fix buffer setup
+deque<sensor_msgs::NavSatFixConstPtr> gps_buffer;
+sensor_msgs::NavSatFixConstPtr latest_gnss_msg;
+deque<geometry_msgs::TwistWithCovarianceStampedPtr> gps_vel_buffer;
+geometry_msgs::TwistWithCovarianceStampedPtr latest_gnss_vel_msg;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -403,8 +404,8 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
 }
 
 void publishGnss(){
-  g_geodetic_converter.geodetic2Enu(latest_gnss->latitude,
-      latest_gnss->longitude, latest_gnss->altitude, &p_gps(0), &p_gps(1), &p_gps(2));
+  g_geodetic_converter.geodetic2Enu(latest_gnss_msg->latitude,
+      latest_gnss_msg->longitude, latest_gnss_msg->altitude, &p_gps(0), &p_gps(1), &p_gps(2));
 
   V3D p_gps_tmp = R_ENU_GNSS * p_gps;
 
@@ -417,10 +418,10 @@ void publishGnss(){
     q.setY(0);
     q.setZ(1);
   transform.setRotation( q );
-  br.sendTransform( tf::StampedTransform(transform, latest_gnss->header.stamp, "odom", "gnss" ) );
+  br.sendTransform( tf::StampedTransform(transform, latest_gnss_msg->header.stamp, "odom", "gnss" ) );
 
   geometry_msgs::PointStamped point_msg;
-  point_msg.header.stamp = latest_gnss->header.stamp;
+  point_msg.header.stamp = latest_gnss_msg->header.stamp;
   point_msg.header.frame_id = "odom";
   point_msg.point.x = p_gps_tmp(0);
   point_msg.point.y = p_gps_tmp(1);
@@ -438,7 +439,7 @@ void gps_cbk(const sensor_msgs::NavSatFix::ConstPtr &msg_in)
       gps_frame = msg_in->header.frame_id;
     }
 
-    //cout<<"GPS got at: "<<msg_in->header.stamp.toSec()<<endl;
+    //cout<<"GPS received at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::NavSatFix::Ptr msg(new sensor_msgs::NavSatFix(*msg_in));
 
     /* TODO: Introduce time sync
@@ -451,10 +452,12 @@ void gps_cbk(const sensor_msgs::NavSatFix::ConstPtr &msg_in)
 
     // now the reference just gets set to the first gps message received
     // TODO: Clarify the initialization -> now ATM we just stick it to the frame
-    if(!g_geodetic_converter.isInitialised() && scan_count > 5) {
+    if(!g_geodetic_converter.isInitialised() && scan_count > 5) { // for now, wait 5 msgs
         ROS_INFO_ONCE("GNSS reference set");
         g_geodetic_converter.initialiseReference(
             msg_in->latitude, msg_in->longitude, msg_in->altitude);
+        // TODO: define translation of odom to gnss_base -> in case gnss is not available at first
+        // Currently we assume the origins match eachother
         }
 
     double timestamp = msg->header.stamp.toSec();
@@ -469,8 +472,8 @@ void gps_cbk(const sensor_msgs::NavSatFix::ConstPtr &msg_in)
 
     last_timestamp_gps = timestamp;
 
-    // gps_buffer.push_back(msg);
-    latest_gnss = msg;
+    gps_buffer.push_back(msg); // this now fills up infinely
+    latest_gnss_msg = msg;
 
     mtx_buffer.unlock();
     sig_buffer.notify_all();
@@ -509,7 +512,7 @@ void gps_vel_cbk(const geometry_msgs::TwistWithCovarianceStamped::ConstPtr &msg_
     last_timestamp_gps_vel = timestamp;
 
     //gps_vel_buffer.push_back(msg);
-    latest_gnss_vel = msg;
+    latest_gnss_vel_msg = msg;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 
@@ -524,7 +527,7 @@ bool sync_packages(MeasureGroup &meas)
     }
 
     /*** push a lidar scan ***/
-    if(!lidar_pushed)
+    if(!lidar_pushed) // is it possible that the lidar is already pushed? Yes if imu time is not there yet!
     {
         meas.lidar = lidar_buffer.front();
         meas.lidar_beg_time = time_buffer.front();
@@ -555,7 +558,7 @@ bool sync_packages(MeasureGroup &meas)
     }
 
     /*** push imu data, and pop from imu buffer ***/
-    double imu_time = imu_buffer.front()->header.stamp.toSec();
+    double imu_time = imu_buffer.front()->header.stamp.toSec(); // here the last temp gets
     meas.imu.clear();
     while ((!imu_buffer.empty()) && (imu_time < lidar_end_time))
     {
@@ -1036,12 +1039,12 @@ void h_share_model_gps(state_ikfom &s, esekfom::dyn_share_datastruct_gps<double>
         return;
     }
 
-    g_geodetic_converter.geodetic2Enu(latest_gnss->latitude,
-        latest_gnss->longitude, latest_gnss->altitude, &p_gps(0), &p_gps(1), &p_gps(2));
+    g_geodetic_converter.geodetic2Enu(latest_gnss_msg->latitude,
+        latest_gnss_msg->longitude, latest_gnss_msg->altitude, &p_gps(0), &p_gps(1), &p_gps(2));
 
-    v_gps = V3D(latest_gnss_vel->twist.twist.linear.x,
-                latest_gnss_vel->twist.twist.linear.y,
-                latest_gnss_vel->twist.twist.linear.x);
+    v_gps = V3D(latest_gnss_vel_msg->twist.twist.linear.x,
+                latest_gnss_vel_msg->twist.twist.linear.y,
+                latest_gnss_vel_msg->twist.twist.linear.x);
 
     // *** Computation of Measuremnt Jacobian matrix H and measurents vector ***
     ekfom_data.h_x = MatrixXd::Zero(update_dim, 9); //2
@@ -1374,6 +1377,17 @@ int main(int argc, char** argv)
                 <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<<" "<<feats_undistort->points.size()<<endl;
                 dump_lio_state_to_log(fp);
             }
+        }
+
+        // first condition: lidar or imu not in sync
+        // second cond: there is imu stuff in the buffer and gps_is also there
+        else if(!imu_buffer.empty() && !gps_buffer.empty()){
+          if(latest_gnss_msg->header.stamp.toSec() - last_timestamp_lidar > 2) { // missing lidar msgs for some time
+            cout << "GNSS update triggered";
+            double solve_H_time_gnss;
+            //kf.update_iterated_dyn_share_modified_gps(GNSS_COV, solve_H_time_gnss); // here the iterated pose estimate is happening
+            gps_buffer.clear();
+          }
         }
 
         status = ros::ok();

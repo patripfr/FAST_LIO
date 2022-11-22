@@ -41,13 +41,20 @@ def main():
     
 
     fig = plt.figure(figsize=(8, 8))
-    ax = fig.add_subplot(111)# projection='3d')
+    ax = fig.add_subplot(211)# projection='3d')
     
     plot_state_estimate_2D(tfs_lio, ax, "Pose Graph")
     plot_state_estimate_2D(points_gnss, ax, "GNSS")
     plot_state_estimate_2D(points_odom, ax, "LIO")
     ax.legend()
     ax.axis('equal')
+    
+    ax1 = fig.add_subplot(212)
+    plot_time_stamps(tfs_lio, ax1, 1, "Pose Graph")
+    plot_time_stamps(tfs_lio, ax1, 2, "GNSS")
+    plot_time_stamps(tfs_lio, ax1, 3, "LIO")
+    ax.legend()
+    ax.title("Matching timestamps (but not receipt time!!)")
     plt.show()
     
 def plot_state_estimate_2D(list_of_containers, ax, label = None):
@@ -69,6 +76,14 @@ def plot_state_estimate_3D(tfs, ax):
                translations[2], 
                c='g', s= 4)
     
+def plot_time_stamps(list_of_containers, ax, value = 0, label = None):
+    times = []
+    initial_stamp = list_of_containers[0].stamp
+    for container in list_of_containers:
+        times.append(container.stamp - initial_stamp)
+    #print(times[::50])
+    ax.scatter(times, [value for t in times], label = label)
+        
     
     
     
