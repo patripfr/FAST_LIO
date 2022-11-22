@@ -5,13 +5,18 @@
     <arg name="rviz" default="true" />
     <arg name="node_start_delay" default="10.0" />
 
-    <group ns="$(arg mav_name)">
       <!-- Rosbag replay:
             2022-09-06-17-21-21_slight_drift_allmend.bag
+            2022-09-06-17-21-21_slight_drift_allmend_corrupted.bag
             2022-06-16-18-18-56_slight_drift.bag -->
+
+    <arg name="bag_name" default="/home/lucas/bags/2022-09-06-17-21-21_slight_drift_allmend.bag" />
+
+    <group ns="$(arg mav_name)">
+
       <node pkg="rosbag" type="play"
             name="replay" args="
-              /home/lucas/bags/2022-09-06-17-21-21_slight_drift_allmend.bag
+              $(arg bag_name) 
               /alphasense_driver_ros/imu:=/kolibri/alphasense_driver_ros/imu
               /os_cloud_node/points:=/kolibri/os_cloud_node/points
               --clock

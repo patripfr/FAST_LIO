@@ -56,6 +56,7 @@
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
 #include <geometry_msgs/Vector3.h>
+#include <geometry_msgs/PointStamped.h>
 #include <geometry_msgs/TwistWithCovarianceStamped.h>
 #include <livox_ros_driver/CustomMsg.h>
 #include "preprocess.h"
@@ -65,6 +66,7 @@
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
+#define GNSS_COV            (0.1)
 #define MAXN                (720000)
 #define PUBFRAME_PERIOD     (20)
 
@@ -129,7 +131,7 @@ KD_TREE<PointType> ikdtree;
 geodetic_converter::GeodeticConverter g_geodetic_converter;
 V3D GPS_T_wrt_IMU(Zero3d);
 M3D GPS_R_wrt_IMU(Eye3d);
-M3D R_ENU_GLOBAL(Eye3d); // for now we assume the global frame to be aligned with the ENU frame
+M3D R_ENU_GNSS(Eye3d); // for now we assume the global frame to be aligned with the ENU frame
 
 V3D p_gps;
 V3D v_gps;
@@ -146,6 +148,8 @@ MeasureGroup Measures;
 esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
 state_ikfom state_point;
 vect3 pos_lid;
+
+ros::Publisher pubGNSS;
 
 nav_msgs::Path path;
 nav_msgs::Odometry odomAftMapped;
@@ -398,13 +402,15 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     sig_buffer.notify_all();
 }
 
-void publishGnssTF(){
+void publishGnss(){
   g_geodetic_converter.geodetic2Enu(latest_gnss->latitude,
       latest_gnss->longitude, latest_gnss->altitude, &p_gps(0), &p_gps(1), &p_gps(2));
 
+  V3D p_gps_tmp = R_ENU_GNSS * p_gps;
+
   static tf::TransformBroadcaster br;
   tf::Transform                   transform;
-  transform.setOrigin(tf::Vector3(p_gps(0), p_gps(1), p_gps(2)));
+  transform.setOrigin(tf::Vector3(p_gps_tmp(0), p_gps_tmp(1), p_gps_tmp(2)));
   tf::Quaternion                  q;
     q.setW(0);
     q.setX(0);
@@ -412,6 +418,15 @@ void publishGnssTF(){
     q.setZ(1);
   transform.setRotation( q );
   br.sendTransform( tf::StampedTransform(transform, latest_gnss->header.stamp, "odom", "gnss" ) );
+
+  geometry_msgs::PointStamped point_msg;
+  point_msg.header.stamp = latest_gnss->header.stamp;
+  point_msg.header.frame_id = "odom";
+  point_msg.point.x = p_gps_tmp(0);
+  point_msg.point.y = p_gps_tmp(1);
+  point_msg.point.z = p_gps_tmp(2);
+
+  pubGNSS.publish(point_msg);
 }
 
 double timediff_gps_wrt_imu = 0.0;
@@ -460,7 +475,7 @@ void gps_cbk(const sensor_msgs::NavSatFix::ConstPtr &msg_in)
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 
-    publishGnssTF();
+    publishGnss();
 }
 
 double timediff_gps_vel_wrt_imu = 0.0;
@@ -472,7 +487,7 @@ void gps_vel_cbk(const geometry_msgs::TwistWithCovarianceStamped::ConstPtr &msg_
       gps_vel_frame = msg_in->header.frame_id;
     }
     publish_count ++;
-    cout<<"GPS_vel got at: "<<msg_in->header.stamp.toSec()<<endl;
+    //cout<<"GPS_vel got at: "<<msg_in->header.stamp.toSec()<<endl;
     geometry_msgs::TwistWithCovarianceStamped::Ptr msg(new geometry_msgs::TwistWithCovarianceStamped(*msg_in));
 
     if (abs(timediff_gps_vel_wrt_imu) > 0.1 && time_sync_en)
@@ -1029,15 +1044,15 @@ void h_share_model_gps(state_ikfom &s, esekfom::dyn_share_datastruct_gps<double>
                 latest_gnss_vel->twist.twist.linear.x);
 
     // *** Computation of Measuremnt Jacobian matrix H and measurents vector ***
-    ekfom_data.h_x = MatrixXd::Zero(update_dim, 6); //2
+    ekfom_data.h_x = MatrixXd::Zero(update_dim, 9); //2
     //ekfom_data.h.resize(update_dim);
 
-    ekfom_data.h_x.block<1, 6>(0,0) = MatrixXd::Identity(6,6);
+    ekfom_data.h_x.block<6, 6>(3,3) = MatrixXd::Identity(6,6);
 
     //temp_h.block<1, 6>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A);
 
-    ekfom_data.h.block<1, 3>(0,0) = p_gps - R_ENU_GLOBAL.transpose() * (s.pos + s.rot * GPS_R_wrt_IMU * GPS_T_wrt_IMU);
-    ekfom_data.h.block<1, 3>(0,0) = v_gps - R_ENU_GLOBAL.transpose() * s.vel;
+    ekfom_data.h.block<1, 3>(0,0) = p_gps - R_ENU_GNSS.transpose() * (s.pos + s.rot * GPS_R_wrt_IMU * GPS_T_wrt_IMU);
+    ekfom_data.h.block<1, 3>(3,0) = v_gps - R_ENU_GNSS.transpose() * s.vel;
 
     // TODO: handle covariances!!
 
@@ -1102,6 +1117,10 @@ int main(int argc, char** argv)
     FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
     HALF_FOV_COS = cos((FOV_DEG) * 0.5 * PI_M / 180.0);
 
+    R_ENU_GNSS << 0.5812024482065641, 0.8136944360189882, 0.010250804379998403,
+                    -0.8133859225380922, 0.581271293509118, -0.022957011109758566,
+                    -0.024638490529107243, 0.005004811083114454, 0.999683898365113;
+
     _featsArray.reset(new PointCloudXYZI());
 
     memset(point_selected_surf, true, sizeof(point_selected_surf));
@@ -1147,6 +1166,8 @@ int main(int argc, char** argv)
         nh.subscribe(lid_topic, 200000, standard_pcl_cbk);
     ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>
             ("/Odometry", 100000);
+    pubGNSS = nh.advertise<geometry_msgs::PointStamped>
+            ("/Gnss", 100000);
     ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
     ros::Subscriber sub_gps = nh.subscribe(gps_topic, 200000, gps_cbk);
     ros::Subscriber sub_gps_vel = nh.subscribe(gps_vel_topic, 200000, gps_vel_cbk);
@@ -1236,7 +1257,8 @@ int main(int argc, char** argv)
             if (feats_down_size < 5)
             {
                 ROS_WARN("No point, skip this scan!\n");
-                //kf.update_iterated_dyn_share_modified_gps(MatrixXd::Zero(update_dim, 12), solve_H_time); // here the iterated pose estimate is happening
+                double solve_H_time_gnss;
+                kf.update_iterated_dyn_share_modified_gps(GNSS_COV, solve_H_time_gnss); // here the iterated pose estimate is happening
                 continue;
             }
 

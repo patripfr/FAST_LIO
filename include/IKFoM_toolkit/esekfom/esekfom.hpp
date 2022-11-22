@@ -1967,7 +1967,7 @@ public:
 	}
 
 
-	void update_iterated_dyn_share_modified_gps(Matrix<scalar_type, 3, 3> R, double &solve_time) {
+	void update_iterated_dyn_share_modified_gps(double R, double &solve_time) {
 		
 		dyn_share_datastruct_gps<scalar_type> dyn_share; // what about this dynamicly shared data struct?
 		dyn_share.valid = true;
@@ -1984,7 +1984,7 @@ public:
 		for(int i=-1; i<maximum_iter; i++)
 		{
 			dyn_share.valid = true;
-			h_dyn_share(x_, dyn_share);
+			h_dyn_share_gps(x_, dyn_share);
 
 			if(! dyn_share.valid)
 			{
