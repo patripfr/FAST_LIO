@@ -19,6 +19,8 @@ import rosbag
 from rospy import Time
 import ros_numpy
 
+import bag_loader
+
 
 #load bag
 bag_path = "/home/lucas/bags/allmend_transform_estimate.bag"
@@ -28,10 +30,11 @@ min_range = 1.0
 
 
 def main():
-    tfs_lio = read_tf_topic(bag, '/kolibri/transform_flu')
+    tfs_lio = bag_loader.read_tf_topic(bag, '/kolibri/transform_flu')
     print("Found transforms: ", len(tfs_lio))
+    # TODO may reevaluate with /Odometry from LIO directly (transfrom flu comes from mav_state_estimation)
 
-    points_gnss = read_point_topic(bag, '/Gnss')
+    points_gnss = bag_loader.read_point_topic(bag, '/Gnss')
     print("Found points: ", len(points_gnss))
 
     #create stamps for lookup
@@ -59,83 +62,16 @@ def main():
     p_gnss = np.asarray(p_gnss).reshape((-1,3))
 
     # optimize rotation via kabsch algorithm: (scipy)
+    # https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.transform.Rotation.align_vectors.html
     rotation, rmsd = R.align_vectors(p_lio, p_gnss)
     print(rotation.as_rotvec())
     print(rotation.as_matrix())
     print(rotation.as_matrix().reshape(-1).tolist())
-
-
-class TF_Stamped():
-    def __init__(self, transl, quat, stamp = None):
-        self.stamp = stamp
-        self.t = np.asarray([[transl.x, transl.y, transl.z]]).T
-        self.quat = quat
-
-        self.rot_matrix = None
-
-        self.generateRotMat()
-
-    def generateRotMat(self):
-        self.rot_matrix = R.from_quat([self.quat.x, self.quat.y, self.quat.z, self.quat.w])
-
-    def transformPoint(self, point):
-        #print(self.rot_matrix.as_matrix(), "\n", self.t)
-        return np.dot(self.rot_matrix.as_matrix(), point) + self.t
-
-def read_tf_topic(bag, topic):
-    print('Reading topic: '+ topic)
-    data = []
-
-    try:
-        msg_type = bag.get_type_and_topic_info()[1][topic][0]
-    except KeyError:
-        print("Oops!  Topic not found, skipping...")
-        msg_type = "not_found_in_bag"
-
-    for topic, msg, t in bag.read_messages(topics=[topic]):
-        time = np.datetime64(msg.header.stamp.secs, 's')+np.timedelta64(msg.header.stamp.nsecs, 'ns')
-
-        tf = TF_Stamped(msg.transform.translation, msg.transform.rotation, time)
-
-        data.append(tf)
-    return data
-
-
-
-
-
-class Point():
-    def __init__(self, transl, stamp = None):
-        self.stamp = stamp
-        self.p = np.asarray([[transl.x, transl.y, transl.z]]).T
-        self.tf = 0
-
-    def generateRotMat(self):
-        self.rot_matrix = R.from_quat([self.quat.x, self.quat.y, self.quat.z, self.quat.w])
-
-    def transformPoint(self, point):
-        #print(self.rot_matrix.as_matrix(), "\n", self.t)
-        return np.dot(self.rot_matrix.as_matrix(), point) + self.t
-
-
-def read_point_topic(bag, topic):
-    print('Reading topic: '+ topic)
-    data = []
-
-    try:
-        msg_type = bag.get_type_and_topic_info()[1][topic][0]
-    except KeyError:
-        print("Oops!  Topic not found, skipping...")
-        msg_type = "not_found_in_bag"
-
-    for topic, msg, t in bag.read_messages(topics=[topic]):
-        time = np.datetime64(msg.header.stamp.secs, 's')+np.timedelta64(msg.header.stamp.nsecs, 'ns')
-
-        point = Point(msg.point, time)
-
-        data.append(point)
-    return data
-
+    
+    ## first result with tf (result of pose graph optimization)
+    # [[ 0.58120245  0.81369444  0.0102508 ]
+    #[-0.81338592  0.58127129 -0.02295701]
+    #[-0.02463849  0.00500481  0.9996839 ]]
 
 def find_nearest(array, value):
     array = np.asarray(array)
