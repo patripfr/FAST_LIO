@@ -66,7 +66,7 @@
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
-#define GNSS_COV            (0.1)
+#define GTSAM_COV            (0.1)
 #define MAXN                (720000)
 #define PUBFRAME_PERIOD     (20)
 
@@ -86,10 +86,10 @@ mutex mtx_buffer;
 condition_variable sig_buffer;
 
 string root_dir = ROOT_DIR;
-string map_file_path, lid_topic, imu_topic, gps_topic, gps_vel_topic;
+string map_file_path, lid_topic, imu_topic, gtsam_topic;
 
 double res_mean_last = 0.05, total_residual = 0.0;
-double last_timestamp_lidar = 0, last_timestamp_imu = -1.0, last_timestamp_gps = -1.0, last_timestamp_gps_vel = -1;
+double last_timestamp_lidar = 0, last_timestamp_imu = -1.0, last_timestamp_gtsam = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
@@ -105,16 +105,13 @@ vector<BoxPointType> cub_needrm;
 vector<PointVector>  Nearest_Points;
 vector<double>       extrinT(3, 0.0);
 vector<double>       extrinR(9, 0.0);
-vector<double>       gpsExtrinT(3, 0.0);
-vector<double>       gpsExtrinR(9, 0.0);
+
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
 // TODO: Fix buffer setup
-deque<sensor_msgs::NavSatFixConstPtr> gps_buffer;
-sensor_msgs::NavSatFixConstPtr latest_gnss_msg;
-deque<geometry_msgs::TwistWithCovarianceStampedPtr> gps_vel_buffer;
-geometry_msgs::TwistWithCovarianceStampedPtr latest_gnss_vel_msg;
+deque<geometry_msgs::TransformStampedConstPtr> gtsam_buffer;
+geometry_msgs::TransformStampedConstPtr latest_gtsam_msg;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -129,13 +126,6 @@ pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
 
 KD_TREE<PointType> ikdtree;
-geodetic_converter::GeodeticConverter g_geodetic_converter;
-V3D GPS_T_wrt_IMU(Zero3d);
-M3D GPS_R_wrt_IMU(Eye3d);
-M3D R_ENU_GNSS(Eye3d); // for now we assume the global frame to be aligned with the ENU frame
-
-V3D p_gps;
-V3D v_gps;
 
 V3F XAxisPoint_body(LIDAR_SP_LEN, 0.0, 0.0);
 V3F XAxisPoint_world(LIDAR_SP_LEN, 0.0, 0.0);
@@ -149,8 +139,6 @@ MeasureGroup Measures;
 esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
 state_ikfom state_point;
 vect3 pos_lid;
-
-ros::Publisher pubGNSS;
 
 nav_msgs::Path path;
 nav_msgs::Odometry odomAftMapped;
@@ -167,9 +155,7 @@ Eigen::MatrixXd cov;
 bool init = false;
 Eigen::Quaterniond grav_q;
 std::string imu_frame;
-std::string gps_frame;
-std::string gps_vel_frame;
-
+std::string gtsam_frame;
 
 bool grav_align = false;
 bool pub_cov = false;
@@ -403,116 +389,40 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     sig_buffer.notify_all();
 }
 
-void publishGnss(){
-  g_geodetic_converter.geodetic2Enu(latest_gnss_msg->latitude,
-      latest_gnss_msg->longitude, latest_gnss_msg->altitude, &p_gps(0), &p_gps(1), &p_gps(2));
+double timediff_gtsam_wrt_imu = 0.0;
+bool   timediff_gtsam_set_flg = false;
 
-  V3D p_gps_tmp = R_ENU_GNSS * p_gps;
-
-  static tf::TransformBroadcaster br;
-  tf::Transform                   transform;
-  transform.setOrigin(tf::Vector3(p_gps_tmp(0), p_gps_tmp(1), p_gps_tmp(2)));
-  tf::Quaternion                  q;
-    q.setW(0);
-    q.setX(0);
-    q.setY(0);
-    q.setZ(1);
-  transform.setRotation( q );
-  br.sendTransform( tf::StampedTransform(transform, latest_gnss_msg->header.stamp, "odom", "gnss" ) );
-
-  geometry_msgs::PointStamped point_msg;
-  point_msg.header.stamp = latest_gnss_msg->header.stamp;
-  point_msg.header.frame_id = "odom";
-  point_msg.point.x = p_gps_tmp(0);
-  point_msg.point.y = p_gps_tmp(1);
-  point_msg.point.z = p_gps_tmp(2);
-
-  pubGNSS.publish(point_msg);
-}
-
-double timediff_gps_wrt_imu = 0.0;
-bool   timediff_gps_set_flg = false;
-
-void gps_cbk(const sensor_msgs::NavSatFix::ConstPtr &msg_in)
+void gtsam_cbk(const geometry_msgs::TransformStamped::ConstPtr &msg_in)
 {
-    if (gps_frame.empty()) {
-      gps_frame = msg_in->header.frame_id;
+    if (gtsam_frame.empty()) {
+      gtsam_frame = msg_in->header.frame_id;
     }
 
-    //cout<<"GPS received at: "<<msg_in->header.stamp.toSec()<<endl;
-    sensor_msgs::NavSatFix::Ptr msg(new sensor_msgs::NavSatFix(*msg_in));
+    //cout<<"gtsam received at: "<<msg_in->header.stamp.toSec()<<endl;
+    geometry_msgs::TransformStamped::Ptr msg(new geometry_msgs::TransformStamped(*msg_in));
 
     /* TODO: Introduce time sync
-    if (abs(timediff_gps_wrt_imu) > 0.1 && time_sync_en)
+    if (abs(timediff_gtsam_wrt_imu) > 0.1 && time_sync_en)
     {
         msg->header.stamp = \
-        ros::Time().fromSec(timediff_gps_wrt_imu + msg_in->header.stamp.toSec());
+        ros::Time().fromSec(timediff_gtsam_wrt_imu + msg_in->header.stamp.toSec());
     }
     */
-
-    // now the reference just gets set to the first gps message received
-    // TODO: Clarify the initialization -> now ATM we just stick it to the frame
-    if(!g_geodetic_converter.isInitialised() && scan_count > 5) { // for now, wait 5 msgs
-        ROS_INFO_ONCE("GNSS reference set");
-        g_geodetic_converter.initialiseReference(
-            msg_in->latitude, msg_in->longitude, msg_in->altitude);
-        // TODO: define translation of odom to gnss_base -> in case gnss is not available at first
-        // Currently we assume the origins match eachother
-        }
-
     double timestamp = msg->header.stamp.toSec();
 
     mtx_buffer.lock();
 
-    if (timestamp < last_timestamp_gps)
+    if (timestamp < last_timestamp_gtsam)
     {
-        ROS_WARN("GPS loop back, clear buffer");
-        //gps_buffer.clear();
+        ROS_WARN("gtsam loop back, clear buffer");
+        //gtsam_buffer.clear();
     }
 
-    last_timestamp_gps = timestamp;
+    last_timestamp_gtsam = timestamp;
 
-    gps_buffer.push_back(msg); // this now fills up infinely
-    latest_gnss_msg = msg;
+    gtsam_buffer.push_back(msg); // this now fills up infinely
+    latest_gtsam_msg = msg;
 
-    mtx_buffer.unlock();
-    sig_buffer.notify_all();
-
-    publishGnss();
-}
-
-double timediff_gps_vel_wrt_imu = 0.0;
-bool   timediff_gps_vel_set_flg = false;
-
-void gps_vel_cbk(const geometry_msgs::TwistWithCovarianceStamped::ConstPtr &msg_in)
-{
-    if (gps_vel_frame.empty()) {
-      gps_vel_frame = msg_in->header.frame_id;
-    }
-    publish_count ++;
-    //cout<<"GPS_vel got at: "<<msg_in->header.stamp.toSec()<<endl;
-    geometry_msgs::TwistWithCovarianceStamped::Ptr msg(new geometry_msgs::TwistWithCovarianceStamped(*msg_in));
-
-    if (abs(timediff_gps_vel_wrt_imu) > 0.1 && time_sync_en)
-    {
-        msg->header.stamp = \
-        ros::Time().fromSec(timediff_gps_vel_wrt_imu + msg_in->header.stamp.toSec());
-    }
-
-    double timestamp = msg->header.stamp.toSec();
-
-    mtx_buffer.lock();
-
-    if (timestamp < last_timestamp_gps_vel)
-    {
-        ROS_WARN("gnss_vel loop back, clear buffer");
-        //gps_vel_buffer.clear();
-    }
-
-    last_timestamp_gps_vel = timestamp;
-
-    //gps_vel_buffer.push_back(msg);
-    latest_gnss_vel_msg = msg;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 
@@ -1029,35 +939,23 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     h_x_cash = temp_h;
 }
 
-void h_share_model_gps(state_ikfom &s, esekfom::dyn_share_datastruct_gps<double> &ekfom_data)
+void h_share_model_gtsam(state_ikfom &s, esekfom::dyn_share_datastruct_gtsam<double> &ekfom_data)
 {
     double solve_start_ = omp_get_wtime();
     double update_dim = 6;
 
-    if (!g_geodetic_converter.isInitialised()) {
-        ROS_ERROR("Geodetic converter not initialized");
-        return;
-    }
-
-    g_geodetic_converter.geodetic2Enu(latest_gnss_msg->latitude,
-        latest_gnss_msg->longitude, latest_gnss_msg->altitude, &p_gps(0), &p_gps(1), &p_gps(2));
-
-    v_gps = V3D(latest_gnss_vel_msg->twist.twist.linear.x,
-                latest_gnss_vel_msg->twist.twist.linear.y,
-                latest_gnss_vel_msg->twist.twist.linear.x);
-
     // *** Computation of Measuremnt Jacobian matrix H and measurents vector ***
-    ekfom_data.h_x = MatrixXd::Zero(update_dim, 9); //2
+    ekfom_data.h_x = MatrixXd::Zero(update_dim, 6); //2
     //ekfom_data.h.resize(update_dim);
 
     ekfom_data.h_x.block<6, 6>(3,3) = MatrixXd::Identity(6,6);
 
     //temp_h.block<1, 6>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A);
 
-    ekfom_data.h.block<1, 3>(0,0) = p_gps - R_ENU_GNSS.transpose() * (s.pos + s.rot * GPS_R_wrt_IMU * GPS_T_wrt_IMU);
-    ekfom_data.h.block<1, 3>(3,0) = v_gps - R_ENU_GNSS.transpose() * s.vel;
+    //ekfom_data.h.block<1, 3>(0,0) = 
+    //ekfom_data.h.block<1, 3>(3,0) = 
 
-    // TODO: handle covariances!!
+    // TODO: handle covariances?!
 
     solve_time += omp_get_wtime() - solve_start_;
     // h_x_cash = temp_h; // why tmp?
@@ -1078,8 +976,7 @@ int main(int argc, char** argv)
     nh.param<string>("map_file_path",map_file_path,"");
     nh.param<string>("common/lid_topic",lid_topic,"/livox/lidar");
     nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
-    nh.param<string>("common/gps_topic", gps_topic, "gps");
-    nh.param<string>("common/gps_vel_topic", gps_vel_topic, "gps_vel");
+    nh.param<string>("common/gtsam_topic", gtsam_topic, "gtsam");
 
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
     nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);
@@ -1104,8 +1001,6 @@ int main(int argc, char** argv)
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
     nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
-    nh.param<vector<double>>("gps/extrinsic_T", gpsExtrinT, vector<double>());
-    nh.param<vector<double>>("gps/extrinsic_R", gpsExtrinR, vector<double>());
 
     cout<<"p_pre->lidar_type "<<p_pre->lidar_type<<endl;
 
@@ -1119,10 +1014,6 @@ int main(int argc, char** argv)
 
     FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
     HALF_FOV_COS = cos((FOV_DEG) * 0.5 * PI_M / 180.0);
-
-    R_ENU_GNSS << 0.5812024482065641, 0.8136944360189882, 0.010250804379998403,
-                    -0.8133859225380922, 0.581271293509118, -0.022957011109758566,
-                    -0.024638490529107243, 0.005004811083114454, 0.999683898365113;
 
     _featsArray.reset(new PointCloudXYZI());
 
@@ -1141,12 +1032,10 @@ int main(int argc, char** argv)
     p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
     p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
 
-    GPS_T_wrt_IMU<<VEC_FROM_ARRAY(gpsExtrinT);
-    GPS_R_wrt_IMU<<MAT_FROM_ARRAY(gpsExtrinR);
 
     double epsi[23] = {0.001};
     fill(epsi, epsi+23, 0.001);
-    kf.init_dyn_share_multi(get_f, df_dx, df_dw, h_share_model, h_share_model_gps, NUM_MAX_ITERATIONS, epsi);
+    kf.init_dyn_share_multi(get_f, df_dx, df_dw, h_share_model, h_share_model_gtsam, NUM_MAX_ITERATIONS, epsi);
     //kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
     /*** debug record ***/
@@ -1169,11 +1058,8 @@ int main(int argc, char** argv)
         nh.subscribe(lid_topic, 200000, standard_pcl_cbk);
     ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>
             ("/Odometry", 100000);
-    pubGNSS = nh.advertise<geometry_msgs::PointStamped>
-            ("/Gnss", 100000);
     ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
-    ros::Subscriber sub_gps = nh.subscribe(gps_topic, 200000, gps_cbk);
-    ros::Subscriber sub_gps_vel = nh.subscribe(gps_vel_topic, 200000, gps_vel_cbk);
+    ros::Subscriber sub_gtsam = nh.subscribe(gtsam_topic, 200000, gtsam_cbk);
 
     ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>
             ("/cloud_registered", 100000);
@@ -1215,14 +1101,14 @@ int main(int argc, char** argv)
             svd_time   = 0;
             t0 = omp_get_wtime();
 
-            p_imu->Process(Measures, kf, feats_undistort);
+            p_imu->Process(Measures, kf, feats_undistort); // in here pcl gets written from measure to feats_undistort
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
                 ROS_WARN("No point, skip this scan!\n");
-                // Here we could introduce the GPS update?
+                // Here we could introduce the gtsam update?
                 continue;
             }
 
@@ -1260,8 +1146,6 @@ int main(int argc, char** argv)
             if (feats_down_size < 5)
             {
                 ROS_WARN("No point, skip this scan!\n");
-                double solve_H_time_gnss;
-                kf.update_iterated_dyn_share_modified_gps(GNSS_COV, solve_H_time_gnss); // here the iterated pose estimate is happening
                 continue;
             }
 
@@ -1380,13 +1264,14 @@ int main(int argc, char** argv)
         }
 
         // first condition: lidar or imu not in sync
-        // second cond: there is imu stuff in the buffer and gps_is also there
-        else if(!imu_buffer.empty() && !gps_buffer.empty()){
-          if(latest_gnss_msg->header.stamp.toSec() - last_timestamp_lidar > 2) { // missing lidar msgs for some time
-            cout << "GNSS update triggered";
-            double solve_H_time_gnss;
-            //kf.update_iterated_dyn_share_modified_gps(GNSS_COV, solve_H_time_gnss); // here the iterated pose estimate is happening
-            gps_buffer.clear();
+        // second cond: there is imu stuff in the buffer and gtsam_is also there
+        else if(!imu_buffer.empty() && !gtsam_buffer.empty()){
+          if(latest_gtsam_msg->header.stamp.toSec() - last_timestamp_lidar > 2) { // missing lidar msgs for some time
+            cout << "gtsam update triggered";
+            double solve_H_time_gtsam;
+            kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
+            gtsam_buffer.clear();
+            
           }
         }
 

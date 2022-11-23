@@ -92,7 +92,7 @@ struct dyn_share_datastruct
 //for the aim to calculate  measurement (z), estimate measurement (h), partial differention matrices (h_x, h_v) and the noise covariance (R) at the same time, by only one function.
 //applied for measurement as an Eigen matrix whose dimension is changing
 template<typename T>
-struct dyn_share_datastruct_gps
+struct dyn_share_datastruct_gtsam
 {
 	bool valid;
 	bool converge;
@@ -141,7 +141,7 @@ public:
 	typedef Eigen::Matrix<scalar_type, Eigen::Dynamic, 1> measurementModel_dyn(state &, bool &);
 	//typedef Eigen::Matrix<scalar_type, Eigen::Dynamic, 1> measurementModel_dyn_share(state &,  dyn_share_datastruct<scalar_type> &);
 	typedef void measurementModel_dyn_share(state &,  dyn_share_datastruct<scalar_type> &);
-	typedef void measurementModel_dyn_share_gps(state &,  dyn_share_datastruct_gps<scalar_type> &);
+	typedef void measurementModel_dyn_share_gtsam(state &,  dyn_share_datastruct_gtsam<scalar_type> &);
 	typedef Eigen::Matrix<scalar_type ,l, n> measurementMatrix1(state &, bool&);
 	typedef Eigen::Matrix<scalar_type , Eigen::Dynamic, n> measurementMatrix1_dyn(state &, bool&);
 	typedef Eigen::Matrix<scalar_type ,l, measurement_noise_dof> measurementMatrix2(state &, bool&);
@@ -271,13 +271,13 @@ public:
 	//receive system-specific models and their differentions
 	//for measurement as an Eigen matrix whose dimension is changing.
 	//calculate  measurement (z), estimate measurement (h), partial differention matrices (h_x, h_v) and the noise covariance (R) at the same time, by only one function (h_dyn_share_in).
-	void init_dyn_share_multi(processModel f_in, processMatrix1 f_x_in, processMatrix2 f_w_in, measurementModel_dyn_share h_dyn_share_in, measurementModel_dyn_share_gps h_dyn_share_gps_in, int maximum_iteration, scalar_type limit_vector[n])
+	void init_dyn_share_multi(processModel f_in, processMatrix1 f_x_in, processMatrix2 f_w_in, measurementModel_dyn_share h_dyn_share_in, measurementModel_dyn_share_gtsam h_dyn_share_gtsam_in, int maximum_iteration, scalar_type limit_vector[n])
 	{
 		f = f_in;
 		f_x = f_x_in;
 		f_w = f_w_in;
 		h_dyn_share = h_dyn_share_in;
-		h_dyn_share_gps = h_dyn_share_gps_in;
+		h_dyn_share_gtsam = h_dyn_share_gtsam_in;
 
 		maximum_iter = maximum_iteration;
 		for(int i=0; i<n; i++)
@@ -1967,9 +1967,9 @@ public:
 	}
 
 
-	void update_iterated_dyn_share_modified_gps(double R, double &solve_time) {
+	void update_iterated_dyn_share_modified_gtsam(double R, double &solve_time) {
 		
-		dyn_share_datastruct_gps<scalar_type> dyn_share; // what about this dynamicly shared data struct?
+		dyn_share_datastruct_gtsam<scalar_type> dyn_share; // what about this dynamicly shared data struct?
 		dyn_share.valid = true;
 		dyn_share.converge = true;
 		int t = 0;
@@ -1984,7 +1984,7 @@ public:
 		for(int i=-1; i<maximum_iter; i++)
 		{
 			dyn_share.valid = true;
-			h_dyn_share_gps(x_, dyn_share);
+			h_dyn_share_gtsam(x_, dyn_share);
 
 			if(! dyn_share.valid)
 			{
@@ -2206,7 +2206,7 @@ private:
 
 	measurementModel_share *h_share;
 	measurementModel_dyn_share *h_dyn_share;
-	measurementModel_dyn_share_gps *h_dyn_share_gps;
+	measurementModel_dyn_share_gtsam *h_dyn_share_gtsam;
 
 	int maximum_iter = 0;
 	scalar_type limit[n];
