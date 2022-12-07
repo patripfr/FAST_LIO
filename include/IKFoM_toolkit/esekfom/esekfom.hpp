@@ -98,7 +98,7 @@ struct dyn_share_datastruct_gtsam
 	bool converge;
 	Eigen::Matrix<T, 6, 1> h;
 	Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> h_v;
-	Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> h_x;
+	Eigen::Matrix<T, 6, 6> h_x;
 	Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> R;
 };
 

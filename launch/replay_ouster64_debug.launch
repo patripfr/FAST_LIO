@@ -34,7 +34,7 @@
       <param name="filter_size_map" type="double" value="0.45" />
       <param name="cube_side_length" type="double" value="200" />
       <param name="runtime_pos_log_enable" type="bool" value="0" />
-      <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen"  launch-prefix="bash -c 'sleep $(arg node_start_delay); $0 $@' "/>
+      <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen"  launch-prefix="gdb -ex run --args"/>
 
       <!-- IMU FLU Rotater -->
       <node pkg="mav_startup" type="kolibri_flip_imu.py" name="imu_flu_publisher" output="screen" required="true">

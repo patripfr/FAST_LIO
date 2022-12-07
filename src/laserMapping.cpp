@@ -96,7 +96,7 @@ double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_en
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
-bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
+bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited, flg_GTSAM_update_required = false;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 
 
@@ -110,8 +110,8 @@ deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
 // TODO: Fix buffer setup
-deque<geometry_msgs::TransformStampedConstPtr> gtsam_buffer;
-geometry_msgs::TransformStampedConstPtr latest_gtsam_msg;
+deque<geometry_msgs::TransformStamped::ConstPtr> gtsam_buffer;
+geometry_msgs::TransformStamped::ConstPtr latest_gtsam_msg;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -462,20 +462,9 @@ bool sync_packages(MeasureGroup &meas)
         lidar_pushed = true;
     }
 
-    if (last_timestamp_imu < lidar_end_time)
+    if (last_timestamp_imu < lidar_end_time) // returing if we don't have enough IMU timestamps
     {
         return false;
-    }
-
-    /*** push imu data, and pop from imu buffer ***/
-    double imu_time = imu_buffer.front()->header.stamp.toSec(); // here the last temp gets
-    meas.imu.clear();
-    while ((!imu_buffer.empty()) && (imu_time < lidar_end_time))
-    {
-        imu_time = imu_buffer.front()->header.stamp.toSec();
-        if(imu_time > lidar_end_time) break;
-        meas.imu.push_back(imu_buffer.front());
-        imu_buffer.pop_front();
     }
 
     lidar_buffer.pop_front();
@@ -942,13 +931,12 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
 void h_share_model_gtsam(state_ikfom &s, esekfom::dyn_share_datastruct_gtsam<double> &ekfom_data)
 {
     double solve_start_ = omp_get_wtime();
-    double update_dim = 6;
 
     // *** Computation of Measuremnt Jacobian matrix H and measurents vector ***
-    ekfom_data.h_x = MatrixXd::Zero(update_dim, 6); //2
+    //ekfom_data.h_x = MatrixXd::Zero(update_dim, 6); //2
     //ekfom_data.h.resize(update_dim);
 
-    ekfom_data.h_x.block<6, 6>(3,3) = MatrixXd::Identity(6,6);
+    //ekfom_data.h_x.block<6, 6>(3,3) = MatrixXd::Identity(6,6); // might not be defined
 
     //temp_h.block<1, 6>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A);
 
@@ -1082,12 +1070,11 @@ int main(int argc, char** argv)
     {
         if (flg_exit) break;
         ros::spinOnce();
-        if(sync_packages(Measures))
+        if(sync_packages(Measures)) // select IMU msgs relevant to propagate
         {
             if (flg_first_scan)
             {
                 first_lidar_time = Measures.lidar_beg_time;
-                p_imu->first_lidar_time = first_lidar_time;
                 flg_first_scan = false;
                 continue;
             }
@@ -1100,15 +1087,19 @@ int main(int argc, char** argv)
             solve_const_H_time = 0;
             svd_time   = 0;
             t0 = omp_get_wtime();
-
-            p_imu->Process(Measures, kf, feats_undistort); // in here pcl gets written from measure to feats_undistort
-            state_point = kf.get_x();
+            
+            p_imu->PropagateState(imu_buffer, kf, lidar_end_time);
+            ROS_INFO("State propagated for scan");
+            p_imu->UndistortPcl(Measures, kf, *feats_undistort);
+            
+            //p_imu->Process(Measures, kf, feats_undistort); // in here pcl gets written from measure to feats_undistort
+            state_point = kf.get_x(); // todo check if initialized
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
                 ROS_WARN("No point, skip this scan!\n");
-                // Here we could introduce the gtsam update?
+                flg_GTSAM_update_required = true;
                 continue;
             }
 
@@ -1146,6 +1137,8 @@ int main(int argc, char** argv)
             if (feats_down_size < 5)
             {
                 ROS_WARN("No point, skip this scan!\n");
+                flg_GTSAM_update_required = true;
+
                 continue;
             }
 
@@ -1188,7 +1181,7 @@ int main(int argc, char** argv)
 
             const double start_eig = omp_get_wtime();
 
-            {
+            { // Eigen vector calculation for Covariance Calculation
               const auto hth = h_x_cash.leftCols(3).transpose()*h_x_cash.leftCols(3);
               Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3,3>> eigen(hth);
               auto eval = eigen.eigenvalues().real();
@@ -1262,17 +1255,20 @@ int main(int argc, char** argv)
                 dump_lio_state_to_log(fp);
             }
         }
+        // if there wasn't a new lidar msg for too long
+        else if(!gtsam_buffer.empty()){
+          if(latest_gtsam_msg->header.stamp.toSec() - last_timestamp_lidar > 2){ // TODO parametrize minimal time to update
+            flg_GTSAM_update_required = true;
+          }
+        }
 
         // first condition: lidar or imu not in sync
         // second cond: there is imu stuff in the buffer and gtsam_is also there
-        else if(!imu_buffer.empty() && !gtsam_buffer.empty()){
-          if(latest_gtsam_msg->header.stamp.toSec() - last_timestamp_lidar > 2) { // missing lidar msgs for some time
+        if(flg_GTSAM_update_required && !imu_buffer.empty() && !gtsam_buffer.empty()){
             cout << "gtsam update triggered";
             double solve_H_time_gtsam;
-            kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
-            gtsam_buffer.clear();
-            
-          }
+            //kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
+            gtsam_buffer.clear();    
         }
 
         status = ros::ok();
