@@ -22,13 +22,44 @@ import bag_loader
 
 
 #load bag
-bag_path = "/home/lucas/bags/missing_pcl_no_gps.bag"
-bag = rosbag.Bag(bag_path)
+
 
 min_range = 1.0
 
 
 def main():
+    vis_odoms()    
+    #vis_corrupted_bag()
+    
+def vis_odoms():
+    # previous implementation
+    #original_path = "/home/lucas/bags/gtsam_fusion/original_prediction.bag"
+    #original_bag = rosbag.Bag(updated_prediction_path)
+    
+    #points_original = bag_loader.read_odom_topic(original_bag, '/Odometry')
+        
+    # new predictions
+    updated_prediction_path = "/home/lucas/bags/gtsam_fusion/new_prediction_update.bag"
+    updated_bag = rosbag.Bag(updated_prediction_path)
+    
+    points_odom_updated = bag_loader.read_odom_topic(updated_bag, '/Odometry')
+    
+    # create plot
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111)# projection='3d')
+    
+    plot_state_estimate_2D(points_odom_updated, ax, "Updated odometry")
+    #plot_state_estimate_2D(points_original, ax, "Original odometry")
+    
+    ax.legend()
+    plt.show()
+    
+    pass
+    
+def vis_corrupted_bag():
+    bag_path = "/home/lucas/bags/gtsam_fusion/missing_pcl_no_gps.bag"
+    bag = rosbag.Bag(bag_path)
+
     tfs_lio = bag_loader.read_tf_topic(bag, '/kolibri/transform_flu')
     print("Found transforms: ", len(tfs_lio))
     # TODO may reevaluate with /Odometry from LIO directly (transfrom flu comes from mav_state_estimation)
@@ -51,10 +82,10 @@ def main():
     
     ax1 = fig.add_subplot(212)
     plot_time_stamps(tfs_lio, ax1, 1, "Pose Graph")
-    plot_time_stamps(tfs_lio, ax1, 2, "GNSS")
-    plot_time_stamps(tfs_lio, ax1, 3, "LIO")
+    plot_time_stamps(points_gnss, ax1, 2, "GNSS")
+    plot_time_stamps(points_odom, ax1, 3, "LIO")
     ax.legend()
-    ax.title("Matching timestamps (but not receipt time!!)")
+    #ax.title("Matching timestamps (but not receipt time!!)")
     plt.show()
     
 def plot_state_estimate_2D(list_of_containers, ax, label = None):

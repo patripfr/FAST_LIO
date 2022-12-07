@@ -430,9 +430,9 @@ void gtsam_cbk(const geometry_msgs::TransformStamped::ConstPtr &msg_in)
 
 double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
-bool sync_packages(MeasureGroup &meas)
+bool prepareLidar(MeasureGroup &meas)
 {
-    if (lidar_buffer.empty() || imu_buffer.empty()) {
+    if (lidar_buffer.empty()) {
         return false;
     }
 
@@ -645,6 +645,7 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
     static tf::TransformBroadcaster br;
     tf::Transform                   transform;
     tf::Quaternion                  q;
+    
     transform.setOrigin(tf::Vector3(odomAftMapped.pose.pose.position.x, \
       odomAftMapped.pose.pose.position.y, \
       odomAftMapped.pose.pose.position.z));
@@ -654,6 +655,8 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
       q.setZ(odomAftMapped.pose.pose.orientation.z);
       transform.setRotation( q );
       br.sendTransform( tf::StampedTransform( transform, odomAftMapped.header.stamp, "camera_init", "body" ) );
+      
+    
     maplab_msgs::OdometryWithImuBiases msg;
     msg.pose = odomAftMapped.pose;
     msg.child_frame_id = imu_frame;
@@ -1070,7 +1073,7 @@ int main(int argc, char** argv)
     {
         if (flg_exit) break;
         ros::spinOnce();
-        if(sync_packages(Measures)) // select IMU msgs relevant to propagate
+        if(prepareLidar(Measures)) // select IMU msgs relevant to propagate
         {
             if (flg_first_scan)
             {
@@ -1089,7 +1092,6 @@ int main(int argc, char** argv)
             t0 = omp_get_wtime();
             
             p_imu->PropagateState(imu_buffer, kf, lidar_end_time);
-            ROS_INFO("State propagated for scan");
             p_imu->UndistortPcl(Measures, kf, *feats_undistort);
             
             //p_imu->Process(Measures, kf, feats_undistort); // in here pcl gets written from measure to feats_undistort
@@ -1265,10 +1267,10 @@ int main(int argc, char** argv)
         // first condition: lidar or imu not in sync
         // second cond: there is imu stuff in the buffer and gtsam_is also there
         if(flg_GTSAM_update_required && !imu_buffer.empty() && !gtsam_buffer.empty()){
-            cout << "gtsam update triggered";
+            ROS_INFO_THROTTLE(10,"gtsam update triggered");
             double solve_H_time_gtsam;
             //kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
-            gtsam_buffer.clear();    
+            gtsam_buffer.clear();
         }
 
         status = ros::ok();
