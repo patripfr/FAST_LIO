@@ -20,10 +20,6 @@ import ros_numpy
 
 import bag_loader
 
-
-#load bag
-
-
 min_range = 1.0
 
 
@@ -32,30 +28,28 @@ def main():
     #vis_corrupted_bag()
     
 def vis_odoms():
-    # previous implementation
-    #original_path = "/home/lucas/bags/gtsam_fusion/original_prediction.bag"
-    #original_bag = rosbag.Bag(updated_prediction_path)
+    paths = ["/home/lucas/bags/gtsam_fusion/original_prediction_update.bag",
+             "/home/lucas/bags/gtsam_fusion/new_prediction_update.bag",
+             "/home/lucas/bags/gtsam_fusion/new_prediction_update2.bag"]
+    names = ["Original",
+             "Try1",
+             "Try2"]
     
-    #points_original = bag_loader.read_odom_topic(original_bag, '/Odometry')
-        
-    # new predictions
-    updated_prediction_path = "/home/lucas/bags/gtsam_fusion/new_prediction_update.bag"
-    updated_bag = rosbag.Bag(updated_prediction_path)
+    vis_odom(paths, names)
     
-    points_odom_updated = bag_loader.read_odom_topic(updated_bag, '/Odometry')
-    
+def vis_odom(paths, names):
     # create plot
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111)# projection='3d')
     
-    plot_state_estimate_2D(points_odom_updated, ax, "Updated odometry")
-    #plot_state_estimate_2D(points_original, ax, "Original odometry")
+    for path, name in zip(paths, names):
+        bag = rosbag.Bag(path)
+        points = bag_loader.read_odom_topic(bag, '/Odometry')
+        plot_state_estimate_2D(points, ax, name)
     
     ax.legend()
     plt.show()
-    
-    pass
-    
+        
 def vis_corrupted_bag():
     bag_path = "/home/lucas/bags/gtsam_fusion/missing_pcl_no_gps.bag"
     bag = rosbag.Bag(bag_path)

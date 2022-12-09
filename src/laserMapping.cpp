@@ -61,7 +61,6 @@
 #include <livox_ros_driver/CustomMsg.h>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
-#include <geodetic_utils/geodetic_conv.hpp>
 #include <maplab_msgs/OdometryWithImuBiases.h>
 
 #define INIT_TIME           (0.1)
@@ -112,6 +111,9 @@ deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
 // TODO: Fix buffer setup
 deque<geometry_msgs::TransformStamped::ConstPtr> gtsam_buffer;
 geometry_msgs::TransformStamped::ConstPtr latest_gtsam_msg;
+
+V3D p_cur_gtsam;
+Eigen::Quaternion<double> q_cur_gtsam;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -886,7 +888,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     double solve_start_  = omp_get_wtime();
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
-    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23
+    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23 12 states for rot pos, T_I_L, R_I_L
     ekfom_data.h.resize(effct_feat_num);
 
 
@@ -936,14 +938,20 @@ void h_share_model_gtsam(state_ikfom &s, esekfom::dyn_share_datastruct_gtsam<dou
     double solve_start_ = omp_get_wtime();
 
     // *** Computation of Measuremnt Jacobian matrix H and measurents vector ***
-    //ekfom_data.h_x = MatrixXd::Zero(update_dim, 6); //2
+    ekfom_data.h_x = MatrixXd::Zero(12, 12); //2
     //ekfom_data.h.resize(update_dim);
 
-    //ekfom_data.h_x.block<6, 6>(3,3) = MatrixXd::Identity(6,6); // might not be defined
-
+    ekfom_data.h_x.block<6, 6>(0,0) = MatrixXd::Identity(6,6);
+    // measurment becomes a quaternion and a vector, so dim7?
     //temp_h.block<1, 6>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A);
-
-    //ekfom_data.h.block<1, 3>(0,0) = 
+    
+    //s.rot to angle axis or quat??
+    
+    Eigen::AngleAxisd a_measured = Eigen::AngleAxisd(q_cur_gtsam);
+    Eigen::AngleAxisd a_predicted = Eigen::AngleAxisd(s.rot);
+    
+    ekfom_data.h.block<3, 1>(0,0) = p_cur_gtsam - s.pos;
+    ekfom_data.h.block<3, 1>(3,0) = a_measured.angle() * a_measured.axis() - a_predicted.angle() * a_predicted.axis();// insert translation here!!
     //ekfom_data.h.block<1, 3>(3,0) = 
 
     // TODO: handle covariances?!
@@ -1162,7 +1170,7 @@ int main(int argc, char** argv)
             pointSearchInd_surf.resize(feats_down_size);
             Nearest_Points.resize(feats_down_size);
             int  rematch_num = 0;
-            bool nearest_search_en = true; //
+            bool nearest_search_en = true;
 
             t2 = omp_get_wtime();
 
@@ -1256,6 +1264,8 @@ int main(int argc, char** argv)
                 <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<<" "<<feats_undistort->points.size()<<endl;
                 dump_lio_state_to_log(fp);
             }
+            
+            gtsam_buffer.clear(); // We are only interested in msgs that came after the last lidar update
         }
         // if there wasn't a new lidar msg for too long
         else if(!gtsam_buffer.empty()){
@@ -1269,8 +1279,17 @@ int main(int argc, char** argv)
         if(flg_GTSAM_update_required && !imu_buffer.empty() && !gtsam_buffer.empty()){
             ROS_INFO_THROTTLE(10,"gtsam update triggered");
             double solve_H_time_gtsam;
-            //kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
-            gtsam_buffer.clear();
+            /*
+            for(auto it = gtsam_buffer.begin(); it != gtsam_buffer.end(); it++) {
+              double gtsam_time = (*it)->header.stamp.toSec();
+              tf::vectorMsgToEigen((*it)->transform.translation, p_cur_gtsam);
+              tf::quaternionMsgToEigen((*it)->transform.rotation, q_cur_gtsam);
+              
+              p_imu->PropagateState(imu_buffer, kf, gtsam_time);
+              kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
+              gtsam_buffer.clear();
+            }
+            */
         }
 
         status = ros::ok();

@@ -256,9 +256,10 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
     auto &&head = *(it_imu);
     auto &&tail = *(it_imu + 1);
     
-    if(tail->header.stamp.toSec() > target_time) {
-      return;
-    }
+    // Not used atm because we predict until exact target time
+    //if(tail->header.stamp.toSec() > target_time) {
+    //  return;
+    //}
 
     angvel_avr<<0.5 * (head->angular_velocity.x + tail->angular_velocity.x),
                 0.5 * (head->angular_velocity.y + tail->angular_velocity.y),
@@ -266,18 +267,26 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
     acc_avr   <<0.5 * (head->linear_acceleration.x + tail->linear_acceleration.x),
                 0.5 * (head->linear_acceleration.y + tail->linear_acceleration.y),
                 0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z);
+                
+    // TODO: swap this should be dt dependand (0.5 only holds prediction for 2 imu frames)
 
     // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
 
-    acc_avr     = acc_avr * G_m_s2 / mean_acc.norm(); // - state_inout.ba;
+    acc_avr = acc_avr * G_m_s2 / mean_acc.norm(); // - state_inout.ba;
 
-    if(head->header.stamp.toSec() < last_kf_update_time) 
+    if(head->header.stamp.toSec() < last_kf_update_time && 
+       tail->header.stamp.toSec() < last_kf_update_time) // old data 
+    {
+      ROS_WARN("KF prediction stamp ahead of imu stamp");
+      continue;
+    }
+    else if(head->header.stamp.toSec() < last_kf_update_time && 
+            tail->header.stamp.toSec() > last_kf_update_time)
     {
       dt = tail->header.stamp.toSec() - last_kf_update_time; // closing the gap to the next IMU update
-      // dt = tail->header.stamp.toSec() - pcl_beg_time;
     }
     else if(tail->header.stamp.toSec() > target_time) { // precisely matching the target time
-      dt = target_time - tail->header.stamp.toSec();
+      dt = target_time - head->header.stamp.toSec();
     }
     else
     {
@@ -291,8 +300,8 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
     Q.block<3, 3>(6, 6).diagonal() = cov_bias_gyr;
     Q.block<3, 3>(9, 9).diagonal() = cov_bias_acc;
     
-    if(dt > 0.1){
-      ROS_ERROR("Large prediction step dt = %f", dt);
+    if(dt > 0.1 || dt < 0.0) {
+      ROS_WARN("KF prediction: Suspicious dt = %f", dt);
     }
     
     kf_state.predict(dt, Q, in);
@@ -305,16 +314,18 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
     {
       acc_s_last[i] += imu_state.grav[i];
     }
-    double &&t = tail->header.stamp.toSec(); // && creates temporaries without making a copy, WTF why here?
+    
+    double &&t = head->header.stamp.toSec() + dt; // && creates temporaries without making a copy, WTF why here?
     IMUpose.push_back(set_pose6d(t, acc_s_last, angvel_last, imu_state.vel, imu_state.pos, imu_state.rot.toRotationMatrix()));
-  
-    // remove element and set the pointer one further
+    last_kf_update_time = t;
+    
+    // remove head element and set the pointer one further
     it_imu = imu_buffer.erase(it_imu);
+    
+    if(t >= target_time){ // TODO integrate this more nicely
+      break;
+    }
   }
-
-  // fill the time to the last
-  auto &&last_element = *(it_imu);
-  last_kf_update_time = last_element->header.stamp.toSec();
 }
 
 
@@ -336,7 +347,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   }
   
   /*** calculated the pos and attitude prediction at the frame-end ***/
-  double note = pcl_end_time > last_kf_update_time ? 1.0 : -1.0;
+  double note = pcl_end_time >= last_kf_update_time ? 1.0 : -1.0;
   if (note == -1.0) {
     ROS_WARN("imu_end_time > pcl_end_time");
   }
