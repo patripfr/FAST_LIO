@@ -88,6 +88,7 @@ def read_topic(bag, topic):
     except KeyError:
         print("Oops!  Topic not found, skipping...")
         msg_type = "not_found_in_bag"
+        return None
         
     if not msg_type in available_msg_types:
         print("read " + msg_type + " is not implemented yet")

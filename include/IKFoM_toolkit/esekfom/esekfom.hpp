@@ -2066,9 +2066,8 @@ public:
 				P_temp. template block<12, 12>(0, 0) += HTH;
 
 				cov P_inv = P_temp.inverse();
-				//std::cout << "line 1781" << std::endl;
+				
 				K_h = P_inv. template block<n, 12>(0, 0) * h_x_.transpose() * dyn_share.h;
-				//std::cout << "line 1780" << std::endl;
 				//cov HTH_cur = cov::Zero();
 				//HTH_cur. template block<12, 12>(0, 0) = HTH;
 				K_x.setZero(); // = cov::Zero();

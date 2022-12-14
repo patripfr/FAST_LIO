@@ -24,7 +24,7 @@ min_range = 1.0
 
 
 def main():
-    compare_updates()    
+    #compare_updates()    
     compare_corrupted_bag()
     
 def compare_updates():
@@ -44,13 +44,15 @@ def compare_updates():
     vis_odom(paths, names)
 def compare_corrupted_bag():
     paths = [
-             #"/home/lucas/bags/gtsam_fusion/original_prediction_update.bag",
-             "/home/lucas/bags/gtsam_fusion/missing_pcl_no_gps.bag"
+             "/home/lucas/bags/gtsam_fusion/original.bag",
+             "/home/lucas/bags/gtsam_fusion/missing_pcl_no_gps.bag",
+             "/home/lucas/bags/gtsam_fusion/missing_pcl_with_gtsam.bag"
              ]
    
     names = [
-             #"Original",
-             "Corrupted"
+             "Original",
+             "Corrupted",
+             "With GTSAM feedback"
              ]
     vis_states(paths, names)
     
@@ -61,11 +63,11 @@ def vis_states(bag_paths, names):
     ax1 = fig.add_subplot(212)
     
     topics = ['/kolibri/transform_flu',
-              '/Gnss',
+              #'/Gnss',
               '/Odometry']
     
     topic_names = [": Pose Graph",
-                 ": GNSS",
+                 #": GNSS",
                  ": LIO"]
     
     stamp_counter = 0
@@ -78,12 +80,12 @@ def vis_states(bag_paths, names):
             plot_time_stamps(msg_list, ax1, stamp_counter, name + topic_name)
             stamp_counter = stamp_counter + 1
              
-    ax.legend()
+    ax.legend(markerscale=3.)
     ax.axis('equal')
-    ax1.legend()
+    ax1.legend(markerscale=3.)
     #ax.title("Matching timestamps (but not receipt time!!)")
     plt.show()
-    
+    []
 def vis_odom(paths, names):
     # create plot
     fig1 = plt.figure(figsize=(8, 8))
@@ -106,12 +108,15 @@ def vis_odom(paths, names):
         plot_orientations(odoms, [fig1_ax2, fig1_ax3, fig1_ax4], name)
         plot_state_estimate_1D(odoms, [fig2_ax1, fig2_ax2, fig2_ax3], name)
     
-    fig1_ax1.legend()
+    fig1_ax1.legend(markerscale=3.0)
     plt.show()
         
 
     
 def plot_state_estimate_1D(list_of_containers, ax, label = None):
+    if not container_ok(list_of_containers):
+        return
+    
     translations = np.empty((3,1))
     stamps = list()
     
@@ -129,6 +134,9 @@ def plot_state_estimate_1D(list_of_containers, ax, label = None):
     ax[2].set_title("z_transl")
     
 def plot_state_estimate_2D(list_of_containers, ax, label = None):
+    if not container_ok(list_of_containers):
+        return
+    
     translations = np.empty((3,1))
     
     for container in list_of_containers:
@@ -148,6 +156,9 @@ def plot_state_estimate_3D(tfs, ax):
                c='g', s= 4)
                
 def plot_orientations(container, axes, label = None):
+    if not container_ok(list_of_containers):
+        return
+    
     rpy = [list(), list(), list()]
     stamps = list()
     titles = ["roll", "pitch", "yaw"]
@@ -160,14 +171,23 @@ def plot_orientations(container, axes, label = None):
     
     for ax, data, title in zip(axes, rpy, titles):
         ax.scatter(stamps, data, s = 4, label=label)
-        ax.legend()
+        ax.legend(markerscale=3.0)
         ax.set_title(title)
     
 def plot_time_stamps(list_of_containers, ax, value = 0, label = None):
+    if not container_ok(list_of_containers):
+        return
+        
     times = []
     initial_stamp = list_of_containers[0].stamp
     for container in list_of_containers:
         times.append(container.stamp - initial_stamp)
-    ax.scatter(times, [value for t in times], label = label)
+    ax.scatter(times, [value for t in times], s = 4, label = label)
+    
+def container_ok(list_of_containers):
+    if list_of_containers is None or not list_of_containers: # If none or empty
+        print("skipping, no msgs")
+        return False
+    return True
     
 main()

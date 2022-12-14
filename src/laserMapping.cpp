@@ -110,7 +110,7 @@ deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
 // TODO: Fix buffer setup
 deque<geometry_msgs::TransformStamped::ConstPtr> gtsam_buffer;
-geometry_msgs::TransformStamped::ConstPtr latest_gtsam_msg;
+geometry_msgs::TransformStamped::Ptr latest_gtsam_msg;
 
 V3D p_cur_gtsam;
 Eigen::Quaternion<double> q_cur_gtsam;
@@ -729,7 +729,11 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
       Eigen::Matrix3d cov_rot;
       if (grav_align) {
         const auto R_g = grav_q.matrix();
-        cov_pos = R_g * cov * R_g.transpose();
+        //Eigen::Matrix3d test1 = R_g;
+        //Eigen::Matrix3d test2 = cov; // breaking here
+        //Eigen::Matrix3d test3 = cov_r;
+        
+        cov_pos = R_g * cov * R_g.transpose(); // OR HERE !! cov seems to be sth different as 3x3
         cov_rot = R_g * cov_r * R_g.transpose();
       } else {
         cov_pos = cov;
@@ -862,9 +866,9 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
 
 
             MatrixXd centered = nearests.rowwise() - nearests.colwise().mean();
-            MatrixXd cov = centered.adjoint() * centered;
+            MatrixXd cov_local = centered.adjoint() * centered; // here a logcoal covariacne is intru
 
-            SelfAdjointEigenSolver<MatrixXd> eig(cov);
+            SelfAdjointEigenSolver<MatrixXd> eig(cov_local);
             auto eval = eig.eigenvalues().real();
             double weight = (sqrt(abs(eval(1))) - sqrt(abs(eval(0)))) /
                 sqrt(abs(eval(2)));
@@ -938,7 +942,7 @@ void h_share_model_gtsam(state_ikfom &s, esekfom::dyn_share_datastruct_gtsam<dou
     double solve_start_ = omp_get_wtime();
 
     // *** Computation of Measuremnt Jacobian matrix H and measurents vector ***
-    ekfom_data.h_x = MatrixXd::Zero(12, 12); //2
+    ekfom_data.h_x = MatrixXd::Zero(6, 12); //2
     //ekfom_data.h.resize(update_dim);
 
     ekfom_data.h_x.block<6, 6>(0,0) = MatrixXd::Identity(6,6);
@@ -957,7 +961,35 @@ void h_share_model_gtsam(state_ikfom &s, esekfom::dyn_share_datastruct_gtsam<dou
     // TODO: handle covariances?!
 
     solve_time += omp_get_wtime() - solve_start_;
-    // h_x_cash = temp_h; // why tmp?
+    h_x_cash = ekfom_data.h_x; // why tmp?
+}
+
+
+void compute_covariances() { // Eigen vector calculation for Covariance Calculation
+    const auto hth = h_x_cash.leftCols(3).transpose()*h_x_cash.leftCols(3);
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3,3>> eigen(hth);
+    auto eval = eigen.eigenvalues().real();
+    auto diag = Eigen::MatrixXd(3,3);
+    diag.setIdentity();
+    for (auto idx = 0u; idx < 3; ++idx) {
+      diag(idx,idx) = 1./eval(idx);
+    }
+    const Eigen::MatrixXd evec = eigen.eigenvectors().real();
+    cov = evec * diag * evec.transpose();
+    cov = cov / sqrt(eval(0));
+
+    const auto hthr = h_x_cash.leftCols(6).rightCols(3).transpose()*h_x_cash.leftCols(6).rightCols(3);
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3,3>> eigenr(hthr);
+    auto evalr = eigenr.eigenvalues().real();
+    auto diagr = Eigen::MatrixXd(3,3);
+    diagr.setIdentity();
+    for (auto idx = 0u; idx < 3; ++idx) {
+      diagr(idx,idx) = 1./evalr(idx);
+    }
+    const Eigen::MatrixXd evecr = eigenr.eigenvectors().real();
+    cov_r = evecr * diagr * evecr.transpose();
+    cov_r = cov_r / sqrt(evalr(0));
+    cout<< "Covariances computed \n";
 }
 
 int main(int argc, char** argv)
@@ -1191,31 +1223,7 @@ int main(int argc, char** argv)
 
             const double start_eig = omp_get_wtime();
 
-            { // Eigen vector calculation for Covariance Calculation
-              const auto hth = h_x_cash.leftCols(3).transpose()*h_x_cash.leftCols(3);
-              Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3,3>> eigen(hth);
-              auto eval = eigen.eigenvalues().real();
-              auto diag = Eigen::MatrixXd(3,3);
-              diag.setIdentity();
-              for (auto idx = 0u; idx < 3; ++idx) {
-                diag(idx,idx) = 1./eval(idx);
-              }
-              const Eigen::MatrixXd evec = eigen.eigenvectors().real();
-              cov = evec * diag * evec.transpose();
-              cov = cov / sqrt(eval(0));
-
-              const auto hthr = h_x_cash.leftCols(6).rightCols(3).transpose()*h_x_cash.leftCols(6).rightCols(3);
-              Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3,3>> eigenr(hthr);
-              auto evalr = eigenr.eigenvalues().real();
-              auto diagr = Eigen::MatrixXd(3,3);
-              diagr.setIdentity();
-              for (auto idx = 0u; idx < 3; ++idx) {
-                diagr(idx,idx) = 1./evalr(idx);
-              }
-              const Eigen::MatrixXd evecr = eigenr.eigenvectors().real();
-              cov_r = evecr * diagr * evecr.transpose();
-              cov_r = cov_r / sqrt(evalr(0));
-            }
+            compute_covariances();
 
             const double eig_time =  omp_get_wtime() - start_eig;
             // std::cout<<"eig time: "<<eig_time<<std::endl;
@@ -1275,21 +1283,39 @@ int main(int argc, char** argv)
         }
 
         // first condition: lidar or imu not in sync
-        // second cond: there is imu stuff in the buffer and gtsam_is also there
+        // second level condition: there is imu stuff in the buffer and gtsam_is also there
         if(flg_GTSAM_update_required && !imu_buffer.empty() && !gtsam_buffer.empty()){
-            ROS_INFO_THROTTLE(10,"gtsam update triggered");
+            ROS_INFO_THROTTLE(0.1,"gtsam update triggered");
             double solve_H_time_gtsam;
-            /*
-            for(auto it = gtsam_buffer.begin(); it != gtsam_buffer.end(); it++) {
-              double gtsam_time = (*it)->header.stamp.toSec();
-              tf::vectorMsgToEigen((*it)->transform.translation, p_cur_gtsam);
-              tf::quaternionMsgToEigen((*it)->transform.rotation, q_cur_gtsam);
-              
-              p_imu->PropagateState(imu_buffer, kf, gtsam_time);
-              kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
+            
+            if(p_imu->is_initialized()){
+              // TODO: atm we iterate over all available updates
+              for(auto it = gtsam_buffer.begin(); it != gtsam_buffer.end(); it++) {
+                cout<< "Running over gtsam buffer \n";
+                double gtsam_time = (*it)->header.stamp.toSec();
+                tf::vectorMsgToEigen((*it)->transform.translation, p_cur_gtsam);
+                tf::quaternionMsgToEigen((*it)->transform.rotation, q_cur_gtsam);
+                
+                p_imu->PropagateState(imu_buffer, kf, gtsam_time);
+                kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
+                
+                state_point = kf.get_x();
+                euler_cur = SO3ToEuler(state_point.rot);
+                pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+                geoQuat.x = state_point.rot.coeffs()[0];
+                geoQuat.y = state_point.rot.coeffs()[1];
+                geoQuat.z = state_point.rot.coeffs()[2];
+                geoQuat.w = state_point.rot.coeffs()[3];
+                
+                compute_covariances();
+                              
+                publish_odometry(pubOdomAftMapped);
+              }
               gtsam_buffer.clear();
             }
-            */
+            else{
+              ROS_WARN_THROTTLE(10, "no gtsam update, KF not initialized skipping updated");
+            }
         }
 
         status = ros::ok();
