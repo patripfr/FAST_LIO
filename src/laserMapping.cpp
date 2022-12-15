@@ -91,7 +91,7 @@ double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0, last_timestamp_gtsam = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
-double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
+double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0, kf_time;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
@@ -642,7 +642,7 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
 {
     odomAftMapped.header.frame_id = "odom";
     odomAftMapped.child_frame_id = "body";
-    odomAftMapped.header.stamp = ros::Time().fromSec(lidar_end_time);
+    odomAftMapped.header.stamp = ros::Time().fromSec(kf_time);
     set_posestamp(odomAftMapped.pose);
     static tf::TransformBroadcaster br;
     tf::Transform                   transform;
@@ -989,7 +989,6 @@ void compute_covariances() { // Eigen vector calculation for Covariance Calculat
     const Eigen::MatrixXd evecr = eigenr.eigenvectors().real();
     cov_r = evecr * diagr * evecr.transpose();
     cov_r = cov_r / sqrt(evalr(0));
-    cout<< "Covariances computed \n";
 }
 
 int main(int argc, char** argv)
@@ -1067,7 +1066,6 @@ int main(int argc, char** argv)
     double epsi[23] = {0.001};
     fill(epsi, epsi+23, 0.001);
     kf.init_dyn_share_multi(get_f, df_dx, df_dw, h_share_model, h_share_model_gtsam, NUM_MAX_ITERATIONS, epsi);
-    //kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
     /*** debug record ***/
     FILE *fp;
@@ -1131,8 +1129,9 @@ int main(int argc, char** argv)
             svd_time   = 0;
             t0 = omp_get_wtime();
             
-            p_imu->PropagateState(imu_buffer, kf, lidar_end_time);
-            p_imu->UndistortPcl(Measures, kf, *feats_undistort);
+            p_imu->PropagateState(imu_buffer, kf, lidar_end_time); // TODO prediction could be made but update dismissed!
+            p_imu->get_kf_time(kf_time);
+            p_imu->UndistortPcl(Measures, kf, *feats_undistort); // we need the prediction for the undistortion
             
             //p_imu->Process(Measures, kf, feats_undistort); // in here pcl gets written from measure to feats_undistort
             state_point = kf.get_x(); // todo check if initialized
@@ -1209,7 +1208,7 @@ int main(int argc, char** argv)
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
-            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time); // update happens here!
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
@@ -1229,6 +1228,7 @@ int main(int argc, char** argv)
             // std::cout<<"eig time: "<<eig_time<<std::endl;
             /******* Publish odometry *******/
             // cov = h_x_cash.completeOrthogonalDecomposition().pseudoInverse();
+            p_imu->get_kf_time(kf_time);
             publish_odometry(pubOdomAftMapped);
 
             /*** add the feature points to map kdtree ***/
@@ -1277,7 +1277,7 @@ int main(int argc, char** argv)
         }
         // if there wasn't a new lidar msg for too long
         else if(!gtsam_buffer.empty()){
-          if(latest_gtsam_msg->header.stamp.toSec() - last_timestamp_lidar > 2){ // TODO parametrize minimal time to update
+          if(latest_gtsam_msg->header.stamp.toSec() - last_timestamp_lidar > 1.0){ // TODO parametrize minimal time to update
             flg_GTSAM_update_required = true;
           }
         }
@@ -1285,18 +1285,18 @@ int main(int argc, char** argv)
         // first condition: lidar or imu not in sync
         // second level condition: there is imu stuff in the buffer and gtsam_is also there
         if(flg_GTSAM_update_required && !imu_buffer.empty() && !gtsam_buffer.empty()){
-            ROS_INFO_THROTTLE(0.1,"gtsam update triggered");
+            //ROS_INFO_THROTTLE(0.1,"gtsam update triggered");
             double solve_H_time_gtsam;
             
             if(p_imu->is_initialized()){
               // TODO: atm we iterate over all available updates
               for(auto it = gtsam_buffer.begin(); it != gtsam_buffer.end(); it++) {
-                cout<< "Running over gtsam buffer \n";
-                double gtsam_time = (*it)->header.stamp.toSec();
+                ROS_INFO_THROTTLE(5,"Pulling gtsam update");
+                double gtsam_update_time = (*it)->header.stamp.toSec();
                 tf::vectorMsgToEigen((*it)->transform.translation, p_cur_gtsam);
                 tf::quaternionMsgToEigen((*it)->transform.rotation, q_cur_gtsam);
                 
-                p_imu->PropagateState(imu_buffer, kf, gtsam_time);
+                p_imu->PropagateState(imu_buffer, kf, gtsam_update_time);
                 kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
                 
                 state_point = kf.get_x();
@@ -1308,11 +1308,14 @@ int main(int argc, char** argv)
                 geoQuat.w = state_point.rot.coeffs()[3];
                 
                 compute_covariances();
-                              
+
+                p_imu->get_kf_time(kf_time);
                 publish_odometry(pubOdomAftMapped);
               }
               gtsam_buffer.clear();
+              flg_GTSAM_update_required = false;
             }
+            
             else{
               ROS_WARN_THROTTLE(10, "no gtsam update, KF not initialized skipping updated");
             }

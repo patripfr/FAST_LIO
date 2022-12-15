@@ -25,7 +25,8 @@ min_range = 1.0
 
 def main():
     #compare_updates()    
-    compare_corrupted_bag()
+    #compare_corrupted_bag()
+    compare_updated_bag()
     
 def compare_updates():
     paths = ["/home/lucas/bags/gtsam_fusion/original_prediction_update.bag",
@@ -46,15 +47,36 @@ def compare_corrupted_bag():
     paths = [
              "/home/lucas/bags/gtsam_fusion/original.bag",
              "/home/lucas/bags/gtsam_fusion/missing_pcl_no_gps.bag",
-             "/home/lucas/bags/gtsam_fusion/missing_pcl_with_gtsam.bag"
+             "/home/lucas/bags/gtsam_fusion/missing_pcl_with_gtsam.bag",
+             "/home/lucas/bags/gtsam_fusion/missing_pcl_with_gtsam2.bag"
+
              ]
    
     names = [
              "Original",
              "Corrupted",
-             "With GTSAM feedback"
+             "GTSAM FB",
+             "GTSAM FB fixed stamps",
              ]
-    vis_states(paths, names)
+    #vis_states(paths, names)
+    vis_odom(paths, names)
+    
+def compare_updated_bag():
+    paths = [
+             "/home/lucas/bags/gtsam_fusion/original.bag",
+             "/home/lucas/bags/gtsam_fusion/original_updated.bag",
+             "/home/lucas/bags/gtsam_fusion/original_updated2.bag"
+
+             ]
+   
+    names = [
+             "Original",
+             "Original, updated",
+             "Original, updated2",
+             ]
+    #vis_states(paths, names)
+    vis_odom(paths, names)
+
     
 def vis_states(bag_paths, names):
     
@@ -62,11 +84,11 @@ def vis_states(bag_paths, names):
     ax = fig.add_subplot(211)# projection='3d')
     ax1 = fig.add_subplot(212)
     
-    topics = ['/kolibri/transform_flu',
+    topics = [#'/kolibri/transform_flu',
               #'/Gnss',
               '/Odometry']
     
-    topic_names = [": Pose Graph",
+    topic_names = [#": Pose Graph",
                  #": GNSS",
                  ": LIO"]
     
@@ -80,8 +102,6 @@ def vis_states(bag_paths, names):
             plot_time_stamps(msg_list, ax1, stamp_counter, name + topic_name)
             stamp_counter = stamp_counter + 1
              
-    ax.legend(markerscale=3.)
-    ax.axis('equal')
     ax1.legend(markerscale=3.)
     #ax.title("Matching timestamps (but not receipt time!!)")
     plt.show()
@@ -89,15 +109,18 @@ def vis_states(bag_paths, names):
 def vis_odom(paths, names):
     # create plot
     fig1 = plt.figure(figsize=(8, 8))
-    fig1_ax1 = plt.subplot2grid(shape=(3, 3), loc=(0, 0), colspan=2, rowspan=2)
+    fig1_ax1 = plt.subplot2grid(shape=(3, 3), loc=(0, 0), colspan=2, rowspan=3)
     fig1_ax2 = plt.subplot2grid(shape=(3, 3), loc=(0, 2))
     fig1_ax3 = plt.subplot2grid(shape=(3, 3), loc=(1, 2))
     fig1_ax4 = plt.subplot2grid(shape=(3, 3), loc=(2, 2))
     
     fig2 = plt.figure(figsize=(8, 8))
-    fig2_ax1 = plt.subplot2grid(shape=(3, 1), loc=(0, 0))
-    fig2_ax2 = plt.subplot2grid(shape=(3, 1), loc=(1, 0))
-    fig2_ax3 = plt.subplot2grid(shape=(3, 1), loc=(2, 0))
+    fig2_ax1 = plt.subplot2grid(shape=(6, 1), loc=(0, 0))
+    fig2_ax2 = plt.subplot2grid(shape=(6, 1), loc=(1, 0))
+    fig2_ax3 = plt.subplot2grid(shape=(6, 1), loc=(2, 0))
+    fig2_ax4 = plt.subplot2grid(shape=(6, 1), loc=(3, 0))
+    fig2_ax5 = plt.subplot2grid(shape=(6, 1), loc=(4, 0))
+    fig2_ax6 = plt.subplot2grid(shape=(6, 1), loc=(5, 0))
     
     for path, name in zip(paths, names):
         # load bag
@@ -106,7 +129,10 @@ def vis_odom(paths, names):
         
         plot_state_estimate_2D(odoms, fig1_ax1, name)
         plot_orientations(odoms, [fig1_ax2, fig1_ax3, fig1_ax4], name)
+        
         plot_state_estimate_1D(odoms, [fig2_ax1, fig2_ax2, fig2_ax3], name)
+        plot_orientations(odoms, [fig2_ax4, fig2_ax5, fig2_ax6], name)
+
     
     fig1_ax1.legend(markerscale=3.0)
     plt.show()
@@ -128,10 +154,15 @@ def plot_state_estimate_1D(list_of_containers, ax, label = None):
     
     ax[0].scatter(stamps, translations[0], s= 4, label=label)
     ax[0].set_title("x_transl")
+    ax[0].legend(markerscale=3.)
+
     ax[1].scatter(stamps, translations[1], s= 4, label=label)
     ax[1].set_title("y_transl")
+    ax[1].legend(markerscale=3.)
+
     ax[2].scatter(stamps, translations[2], s= 4, label=label)
     ax[2].set_title("z_transl")
+    ax[2].legend(markerscale=3.)
     
 def plot_state_estimate_2D(list_of_containers, ax, label = None):
     if not container_ok(list_of_containers):
@@ -143,6 +174,7 @@ def plot_state_estimate_2D(list_of_containers, ax, label = None):
         translations = np.append(translations, container.t, axis = 1)
         
     ax.scatter(translations[0], translations[1], s= 4, label=label)
+    ax.axis('equal')
     
 def plot_state_estimate_3D(tfs, ax):
     translations = np.empty((3,1))
@@ -156,12 +188,12 @@ def plot_state_estimate_3D(tfs, ax):
                c='g', s= 4)
                
 def plot_orientations(container, axes, label = None):
-    if not container_ok(list_of_containers):
+    if not container_ok(container):
         return
     
     rpy = [list(), list(), list()]
     stamps = list()
-    titles = ["roll", "pitch", "yaw"]
+    titles = ["yaw", "pitch", "roll"]
     
     for element in container:
         for angle, sub_list in zip(element.euler, rpy):
