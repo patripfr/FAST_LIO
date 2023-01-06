@@ -10,7 +10,7 @@
             2022-09-06-17-21-21_slight_drift_allmend_corrupted.bag
             2022-06-16-18-18-56_slight_drift.bag -->
 
-    <arg name="bag_name" value="/home/lucas/bags/gtsam_fusion/2022-09-06-17-21-21_slight_drift_allmend.bag" />
+    <arg name="bag_name" value="/home/lucas/bags/gtsam_fusion/2022-09-06-17-21-21_slight_drift_allmend_corrupted.bag" />
     <!---->
     <group ns="$(arg mav_name)">
 

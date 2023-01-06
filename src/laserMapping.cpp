@@ -91,7 +91,9 @@ double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0, last_timestamp_gtsam = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
-double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0, kf_time;
+double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0, 
+       kf_time, last_update_time;
+double lid_timeout;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
@@ -108,7 +110,6 @@ vector<double>       extrinR(9, 0.0);
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
-// TODO: Fix buffer setup
 deque<geometry_msgs::TransformStamped::ConstPtr> gtsam_buffer;
 geometry_msgs::TransformStamped::Ptr latest_gtsam_msg;
 
@@ -400,16 +401,8 @@ void gtsam_cbk(const geometry_msgs::TransformStamped::ConstPtr &msg_in)
       gtsam_frame = msg_in->header.frame_id;
     }
 
-    //cout<<"gtsam received at: "<<msg_in->header.stamp.toSec()<<endl;
     geometry_msgs::TransformStamped::Ptr msg(new geometry_msgs::TransformStamped(*msg_in));
 
-    /* TODO: Introduce time sync
-    if (abs(timediff_gtsam_wrt_imu) > 0.1 && time_sync_en)
-    {
-        msg->header.stamp = \
-        ros::Time().fromSec(timediff_gtsam_wrt_imu + msg_in->header.stamp.toSec());
-    }
-    */
     double timestamp = msg->header.stamp.toSec();
 
     mtx_buffer.lock();
@@ -417,12 +410,12 @@ void gtsam_cbk(const geometry_msgs::TransformStamped::ConstPtr &msg_in)
     if (timestamp < last_timestamp_gtsam)
     {
         ROS_WARN("gtsam loop back, clear buffer");
-        //gtsam_buffer.clear();
+        gtsam_buffer.clear();
     }
 
     last_timestamp_gtsam = timestamp;
 
-    gtsam_buffer.push_back(msg); // this now fills up infinely
+    gtsam_buffer.push_back(msg);
     latest_gtsam_msg = msg;
 
     mtx_buffer.unlock();
@@ -642,7 +635,7 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
 {
     odomAftMapped.header.frame_id = "odom";
     odomAftMapped.child_frame_id = "body";
-    odomAftMapped.header.stamp = ros::Time().fromSec(kf_time);
+    odomAftMapped.header.stamp = ros::Time().fromSec(last_update_time);
     set_posestamp(odomAftMapped.pose);
     static tf::TransformBroadcaster br;
     tf::Transform                   transform;
@@ -943,22 +936,13 @@ void h_share_model_gtsam(state_ikfom &s, esekfom::dyn_share_datastruct_gtsam<dou
 
     // *** Computation of Measuremnt Jacobian matrix H and measurents vector ***
     ekfom_data.h_x = MatrixXd::Zero(6, 12); //2
-    //ekfom_data.h.resize(update_dim);
-
     ekfom_data.h_x.block<6, 6>(0,0) = MatrixXd::Identity(6,6);
-    // measurment becomes a quaternion and a vector, so dim7?
-    //temp_h.block<1, 6>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A);
-    
-    //s.rot to angle axis or quat??
     
     Eigen::AngleAxisd a_measured = Eigen::AngleAxisd(q_cur_gtsam);
     Eigen::AngleAxisd a_predicted = Eigen::AngleAxisd(s.rot);
     
     ekfom_data.h.block<3, 1>(0,0) = p_cur_gtsam - s.pos;
     ekfom_data.h.block<3, 1>(3,0) = a_measured.angle() * a_measured.axis() - a_predicted.angle() * a_predicted.axis();// insert translation here!!
-    //ekfom_data.h.block<1, 3>(3,0) = 
-
-    // TODO: handle covariances?!
 
     solve_time += omp_get_wtime() - solve_start_;
     h_x_cash = ekfom_data.h_x; // why tmp?
@@ -1006,6 +990,7 @@ int main(int argc, char** argv)
     nh.param<string>("map_file_path",map_file_path,"");
     nh.param<string>("common/lid_topic",lid_topic,"/livox/lidar");
     nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
+    nh.param<double>("common/lid_timeout", lid_timeout, 1.0);
     nh.param<string>("common/gtsam_topic", gtsam_topic, "gtsam");
 
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
@@ -1133,7 +1118,6 @@ int main(int argc, char** argv)
             p_imu->get_kf_time(kf_time);
             p_imu->UndistortPcl(Measures, kf, *feats_undistort); // we need the prediction for the undistortion
             
-            //p_imu->Process(Measures, kf, feats_undistort); // in here pcl gets written from measure to feats_undistort
             state_point = kf.get_x(); // todo check if initialized
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
@@ -1209,6 +1193,8 @@ int main(int argc, char** argv)
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time); // update happens here!
+            last_update_time = kf_time;
+            
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
@@ -1228,7 +1214,6 @@ int main(int argc, char** argv)
             // std::cout<<"eig time: "<<eig_time<<std::endl;
             /******* Publish odometry *******/
             // cov = h_x_cash.completeOrthogonalDecomposition().pseudoInverse();
-            p_imu->get_kf_time(kf_time);
             publish_odometry(pubOdomAftMapped);
 
             /*** add the feature points to map kdtree ***/
@@ -1277,7 +1262,7 @@ int main(int argc, char** argv)
         }
         // if there wasn't a new lidar msg for too long
         else if(!gtsam_buffer.empty()){
-          if(latest_gtsam_msg->header.stamp.toSec() - last_timestamp_lidar > 1.0){ // TODO parametrize minimal time to update
+          if(latest_gtsam_msg->header.stamp.toSec() - last_update_time > lid_timeout){ // TODO parametrize minimal time to update
             flg_GTSAM_update_required = true;
           }
         }
@@ -1296,8 +1281,22 @@ int main(int argc, char** argv)
                 tf::vectorMsgToEigen((*it)->transform.translation, p_cur_gtsam);
                 tf::quaternionMsgToEigen((*it)->transform.rotation, q_cur_gtsam);
                 
-                p_imu->PropagateState(imu_buffer, kf, gtsam_update_time);
+                p_imu->get_kf_time(kf_time);
+                if(gtsam_update_time < last_update_time){
+                  ROS_INFO_THROTTLE(0.1, "Skip gtsam update, msg from the past");
+                  continue;
+                }
+                
+                if(kf_time <= gtsam_update_time) { // necessary because we might have predicted to far previously
+                  p_imu->PropagateState(imu_buffer, kf, gtsam_update_time);
+                  p_imu->get_kf_time(kf_time);
+                }
+                else{
+                  ROS_WARN("Predicted too far, applying gtsam update from previous time (dt = %f)", gtsam_update_time - kf_time);
+                }
+                
                 kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
+                last_update_time = kf_time;
                 
                 state_point = kf.get_x();
                 euler_cur = SO3ToEuler(state_point.rot);
@@ -1309,7 +1308,8 @@ int main(int argc, char** argv)
                 
                 compute_covariances();
 
-                p_imu->get_kf_time(kf_time);
+                //TODO: may introduce separate publisher to observe state but not confuse GTSAM
+                // GTSAM might get overconfident with the state?
                 publish_odometry(pubOdomAftMapped);
               }
               gtsam_buffer.clear();
@@ -1317,7 +1317,7 @@ int main(int argc, char** argv)
             }
             
             else{
-              ROS_WARN_THROTTLE(10, "no gtsam update, KF not initialized skipping updated");
+              ROS_WARN_THROTTLE(10, "no gtsam update, KF not initialized");
             }
         }
 

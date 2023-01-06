@@ -1,8 +1,7 @@
 common:
     lid_topic:  "/os_cloud_node/points"
     imu_topic:  "/alphasense_driver_ros/imu"
-    gps_topic:  "/ublox_gps_node/fix"
-    gps_vel_topic:  "/ublox_gps_node/fix_velocity"
+    lid_timeout: 1.0
     time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
 
 preprocess:
@@ -35,10 +34,3 @@ pcd_save:
     pcd_save_en: true
     interval: -1                 # how many LiDAR frames saved in each pcd file;
                                  # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
-
-
-gps:
-    extrinsic_T: [0.29, 0.0, 0.0]
-    extrinsic_R: [1, 0, 0,
-                  0, 1, 0,
-                  0, 0, 1]

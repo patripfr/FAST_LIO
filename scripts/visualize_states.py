@@ -32,14 +32,16 @@ def compare_updates():
     paths = ["/home/lucas/bags/gtsam_fusion/original_prediction_update.bag",
              #"/home/lucas/bags/gtsam_fusion/new_prediction_update.bag",
              #"/home/lucas/bags/gtsam_fusion/new_prediction_update2.bag",
-             "/home/lucas/bags/gtsam_fusion/new_prediction_update3.bag"
+             "/home/lucas/bags/gtsam_fusion/missing_pcl_with_gtsam4.bag",
+             "/home/lucas/bags/gtsam_fusion/missing_pcl_with_gtsam4.bag"
              ]
    
     names = [
              "Original",
              #"Try1",
              #"Try2",
-             "Try3"
+             "Try3",
+             "CleanedUp4"
              ]
     
     vis_odom(paths, names)
@@ -47,32 +49,31 @@ def compare_corrupted_bag():
     paths = [
              "/home/lucas/bags/gtsam_fusion/original.bag",
              "/home/lucas/bags/gtsam_fusion/missing_pcl_no_gps.bag",
-             "/home/lucas/bags/gtsam_fusion/missing_pcl_with_gtsam.bag",
-             "/home/lucas/bags/gtsam_fusion/missing_pcl_with_gtsam2.bag"
-
+             "/home/lucas/bags/gtsam_fusion/missing_pcl_with_gtsam3.bag",
+             "/home/lucas/bags/gtsam_fusion/missing_pcl_with_gtsam4.bag"
              ]
    
     names = [
              "Original",
              "Corrupted",
-             "GTSAM FB",
-             "GTSAM FB fixed stamps",
+             "GTSAM FB 3",
+             "GTSAM FB 4",
              ]
     #vis_states(paths, names)
     vis_odom(paths, names)
     
 def compare_updated_bag():
     paths = [
+             "/home/lucas/bags/gtsam_fusion/allmend_transform_estimate.bag"
              "/home/lucas/bags/gtsam_fusion/original.bag",
-             "/home/lucas/bags/gtsam_fusion/original_updated.bag",
-             "/home/lucas/bags/gtsam_fusion/original_updated2.bag"
-
+             "/home/lucas/bags/gtsam_fusion/missing_pcl_no_gps.bag",
+             "/home/lucas/bags/gtsam_fusion/evaluate_update0.bag",
              ]
    
-    names = [
-             "Original",
-             "Original, updated",
-             "Original, updated2",
+    names = ["origin bag"
+             "standard lio LIO rerun",
+             "corrupted",
+             "Current GTSAM update",
              ]
     #vis_states(paths, names)
     vis_odom(paths, names)
