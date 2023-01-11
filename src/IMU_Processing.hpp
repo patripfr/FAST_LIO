@@ -40,7 +40,7 @@ class ImuProcess
   ~ImuProcess();
   
   inline bool is_initialized() {return !imu_need_init_;}
-  inline void get_kf_time(double &time) {time = last_kf_update_time;}
+  //inline void get_kf_time(double &time) {time = last_kf_update_time;}
 
   void Reset();
   void Reset(double start_timestamp, const sensor_msgs::ImuConstPtr &lastimu);
@@ -55,6 +55,7 @@ class ImuProcess
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
   void PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, double target_time);
+  void RemoveImuMsgsFromPast(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state);
 
   void UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_out);
 
@@ -82,7 +83,6 @@ class ImuProcess
   V3D acc_s_last;
   double start_timestamp_;
   double last_lidar_end_time;
-  double last_kf_update_time;
   int    init_iter_num = 1;
   bool   b_first_frame_ = true;
   bool   imu_need_init_ = true;
@@ -212,23 +212,20 @@ void ImuProcess::IMU_init(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, esekfom
   init_P(21,21) = init_P(22,22) = 0.00001;
   kf_state.change_P(init_P);
   last_imu_ = imu_buffer.back();
-
+  sensor_msgs::ImuConstPtr first_imu = imu_buffer.front();
+  kf_state.set_time(first_imu->header.stamp.toSec());
 }
 
 void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, double target_time) // find replacement for measure group!
 {
   if(imu_buffer.empty()) {return;};
 
-  state_ikfom imu_state = kf_state.get_x();
+  //state_ikfom imu_state = kf_state.get_x();
     
   if (imu_need_init_)
   {
     /// The very first lidar frame
     IMU_init(imu_buffer, kf_state, init_iter_num);
-
-    imu_need_init_ = true;
-
-    last_imu_ = imu_buffer.back();
 
     if (init_iter_num > MAX_INI_COUNT)
     {
@@ -253,6 +250,7 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
 
   input_ikfom in;
   auto it_imu = imu_buffer.begin();
+  int skip_counter = 0;
   
   while(it_imu < (imu_buffer.end() - 1))
   {
@@ -264,27 +262,30 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
     //  return;
     //}
 
+    // this only makes sense for the next else condition (**)
     angvel_avr<<0.5 * (head->angular_velocity.x + tail->angular_velocity.x),
                 0.5 * (head->angular_velocity.y + tail->angular_velocity.y),
                 0.5 * (head->angular_velocity.z + tail->angular_velocity.z);
     acc_avr   <<0.5 * (head->linear_acceleration.x + tail->linear_acceleration.x),
                 0.5 * (head->linear_acceleration.y + tail->linear_acceleration.y),
-                0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z);
+                0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z); 
                 
     // TODO: this should be dt dependand (0.5 only holds for the prediction within 2 imu frames)
 
     // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
 
     acc_avr = acc_avr * G_m_s2 / mean_acc.norm(); // - state_inout.ba;
-
+    double last_kf_update_time = kf_state.get_time();
     if(target_time < last_kf_update_time){
-      ROS_ERROR("target_time in the past! offset: %f", target_time - last_kf_update_time);
+      ROS_ERROR("target_time in the past! dt: %f", target_time - last_kf_update_time);
       return;
     }
     else if(head->header.stamp.toSec() < last_kf_update_time && 
        tail->header.stamp.toSec() < last_kf_update_time) // old data 
     {
-      ROS_WARN("KF prediction stamp ahead of imu stamp");
+      skip_counter++;
+      ROS_WARN("KF prediction stamp ahead of imu stamp, skipping msg (%i in a row)", skip_counter);
+      it_imu += 1; // this line is VERY important
       continue;
     }
     else if(head->header.stamp.toSec() < last_kf_update_time && 
@@ -296,10 +297,13 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
       tail->header.stamp.toSec() > target_time) { // precisely matching the target time
       dt = target_time - head->header.stamp.toSec();
     }
-    else // head < target time && tail < target_time
+    else // head < target time && tail < target_time (**)
     {
       dt = tail->header.stamp.toSec() - head->header.stamp.toSec();
     }
+    
+    //reset skip_counter
+    skip_counter = 0;
 
     in.acc = acc_avr;
     in.gyro = angvel_avr;
@@ -309,7 +313,7 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
     Q.block<3, 3>(9, 9).diagonal() = cov_bias_acc;
     
     if(dt > 0.1 || dt < 0.0) {
-      ROS_WARN("KF prediction: Suspicious dt = %f", dt);
+      ROS_WARN("PropagateState(): Suspicious dt = %f", dt);
     }
     
     kf_state.predict(dt, Q, in);
@@ -325,17 +329,36 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
     
     double &&t = head->header.stamp.toSec() + dt; // && creates temporaries without making a copy, WTF why here?
     IMUpose.push_back(set_pose6d(t, acc_s_last, angvel_last, imu_state.vel, imu_state.pos, imu_state.rot.toRotationMatrix()));
-    last_kf_update_time = t;
+    kf_state.set_time(t);
     
     // remove head element and set the pointer one further
-    it_imu = imu_buffer.erase(it_imu);
+    //it_imu = imu_buffer.erase(it_imu); // how shall we keep this while not erasing it all?
+    it_imu += 1;
     
     if(t >= target_time){ // TODO integrate this more nicely
       break;
+      ROS_INFO("Prediction sucess");
     }
   }
 }
 
+void ImuProcess::RemoveImuMsgsFromPast(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state){
+  auto it_imu = imu_buffer.begin();
+  double kf_time = kf_state.get_time();
+  
+  while(it_imu < (imu_buffer.end() - 1)) // we always want to keep the last msg!
+  {
+    auto &&msg = *(it_imu);
+    
+    double msg_time = msg->header.stamp.toSec(); // make sure the we keep the last one before the
+    if (msg_time > kf_time){
+      break;
+    }
+
+    // remove head element and set the pointer one further
+    it_imu = imu_buffer.erase(it_imu); // how shall we keep this while not erasing it all?
+  }
+}
 
 void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_out)
 {
@@ -358,6 +381,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   }
   
   /*** calculated the pos and attitude prediction at the frame-end ***/
+  double last_kf_update_time = kf_state.get_time();
   double note = pcl_end_time >= last_kf_update_time ? 1.0 : -1.0;
   if (note == -1.0) {
     ROS_WARN("last_kf_update_time > pcl_end_time:");

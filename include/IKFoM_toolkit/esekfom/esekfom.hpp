@@ -2180,7 +2180,15 @@ public:
 	const cov& get_P() const {
 		return P_;
 	}
+	
+	const void set_time(double t){
+		time_ = t;
+	}
+	const double& get_time(){
+		return time_;
+	}
 private:
+	double time_;
 	state x_;
 	measurement m_;
 	cov P_;

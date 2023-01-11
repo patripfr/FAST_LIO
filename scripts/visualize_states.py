@@ -64,18 +64,18 @@ def compare_corrupted_bag():
     
 def compare_updated_bag():
     paths = [
-             "/home/lucas/bags/gtsam_fusion/allmend_transform_estimate.bag"
              "/home/lucas/bags/gtsam_fusion/original.bag",
-             "/home/lucas/bags/gtsam_fusion/missing_pcl_no_gps.bag",
+             #"/home/lucas/bags/gtsam_fusion/missing_pcl_no_gps.bag",
              "/home/lucas/bags/gtsam_fusion/evaluate_update0.bag",
+             "/home/lucas/bags/gtsam_fusion/fix_timing0.bag",
              ]
    
-    names = ["origin bag"
-             "standard lio LIO rerun",
-             "corrupted",
+    names = ["origin (uncorrupted) bag",
+             #"standard LIO rerun",
              "Current GTSAM update",
+             "Fixed timing"
              ]
-    #vis_states(paths, names)
+    vis_states(paths, names)
     vis_odom(paths, names)
 
     
@@ -85,11 +85,11 @@ def vis_states(bag_paths, names):
     ax = fig.add_subplot(211)# projection='3d')
     ax1 = fig.add_subplot(212)
     
-    topics = [#'/kolibri/transform_flu',
+    topics = ['/kolibri/mav_state_estimator/optimization',
               #'/Gnss',
               '/Odometry']
     
-    topic_names = [#": Pose Graph",
+    topic_names = [": Pose Graph",
                  #": GNSS",
                  ": LIO"]
     
@@ -125,6 +125,7 @@ def vis_odom(paths, names):
     
     for path, name in zip(paths, names):
         # load bag
+        print("Loading bag: "+ path)
         bag = rosbag.Bag(path)
         odoms = bag_loader.read_topic(bag, '/Odometry')
         

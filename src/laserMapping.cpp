@@ -97,7 +97,7 @@ double lid_timeout;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
-bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited, flg_GTSAM_update_required = false;
+bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited = false, flg_GTSAM_update_required = false, flg_state_backup_available = false;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 
 
@@ -141,6 +141,9 @@ M3D Lidar_R_wrt_IMU(Eye3d);
 MeasureGroup Measures;
 esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
 state_ikfom state_point;
+state_ikfom state_backup;
+esekfom::esekf<state_ikfom, 12, input_ikfom>::cov P_backup;
+
 vect3 pos_lid;
 
 nav_msgs::Path path;
@@ -939,10 +942,20 @@ void h_share_model_gtsam(state_ikfom &s, esekfom::dyn_share_datastruct_gtsam<dou
     ekfom_data.h_x.block<6, 6>(0,0) = MatrixXd::Identity(6,6);
     
     Eigen::AngleAxisd a_measured = Eigen::AngleAxisd(q_cur_gtsam);
+    //Eigen::AngleAxisd a_measured_prev = Eigen::AngleAxisd(q_prev_gtsam);
     Eigen::AngleAxisd a_predicted = Eigen::AngleAxisd(s.rot);
+    //Eigen::AngleAxisd a_predicted_prev = Eigen::AngleAxisd(s_prev_rot);
     
     ekfom_data.h.block<3, 1>(0,0) = p_cur_gtsam - s.pos;
-    ekfom_data.h.block<3, 1>(3,0) = a_measured.angle() * a_measured.axis() - a_predicted.angle() * a_predicted.axis();// insert translation here!!
+    // ekfom_data.h.block<3, 1>(0,0) = (p_cur_gtsam - p_prev_gtsam) - (s.pos - s_prev_pos);
+    
+    ekfom_data.h.block<3, 1>(3,0) = a_measured.angle() * a_measured.axis() 
+                                    - a_predicted.angle() * a_predicted.axis();
+    //ekfom_data.h.block<3, 1>(3,0) = 
+    //  (a_measured.angle() * a_measured.axis() 
+    //    - a_measured_prev.angle() * a_measured_prev.axis()) 
+    //  - (a_predicted.angle() * a_predicted.axis()
+    //    - a_predicted_prev.angle() * a_predicted_prev.axis());                
 
     solve_time += omp_get_wtime() - solve_start_;
     h_x_cash = ekfom_data.h_x; // why tmp?
@@ -1114,10 +1127,8 @@ int main(int argc, char** argv)
             svd_time   = 0;
             t0 = omp_get_wtime();
             
-            p_imu->PropagateState(imu_buffer, kf, lidar_end_time); // TODO prediction could be made but update dismissed!
-            p_imu->get_kf_time(kf_time);
-            p_imu->UndistortPcl(Measures, kf, *feats_undistort); // we need the prediction for the undistortion
-            
+            p_imu->PropagateState(imu_buffer, kf, lidar_end_time);
+            p_imu->UndistortPcl(Measures, kf, *feats_undistort); 
             state_point = kf.get_x(); // todo check if initialized
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
@@ -1192,8 +1203,16 @@ int main(int argc, char** argv)
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
-            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time); // update happens here!
-            last_update_time = kf_time;
+            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+            
+            // the update has happened, so now we can keep a backup
+            state_backup = kf.get_x();
+            P_backup = kf.get_P();
+            last_update_time = kf.get_time();
+            flg_state_backup_available = true;
+
+            // empty IMU buffer here until kf_time (lidar_end_time) or lidar_beg_time
+            p_imu->RemoveImuMsgsFromPast(imu_buffer, kf);
             
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
@@ -1264,6 +1283,7 @@ int main(int argc, char** argv)
         else if(!gtsam_buffer.empty()){
           if(latest_gtsam_msg->header.stamp.toSec() - last_update_time > lid_timeout){ // TODO parametrize minimal time to update
             flg_GTSAM_update_required = true;
+            ROS_INFO_ONCE("GTSAM_update required");
           }
         }
 
@@ -1281,22 +1301,31 @@ int main(int argc, char** argv)
                 tf::vectorMsgToEigen((*it)->transform.translation, p_cur_gtsam);
                 tf::quaternionMsgToEigen((*it)->transform.rotation, q_cur_gtsam);
                 
-                p_imu->get_kf_time(kf_time);
-                if(gtsam_update_time < last_update_time){
-                  ROS_INFO_THROTTLE(0.1, "Skip gtsam update, msg from the past");
+                // check if the timing is matching
+                kf_time = kf.get_time();
+                if(gtsam_update_time < last_update_time) {
+                  ROS_INFO_THROTTLE(0.1, "Skip gtsam update, msg from the past"); // this should not trigger at all!!
                   continue;
                 }
-                
-                if(kf_time <= gtsam_update_time) { // necessary because we might have predicted to far previously
-                  p_imu->PropagateState(imu_buffer, kf, gtsam_update_time);
-                  p_imu->get_kf_time(kf_time);
+                else if(gtsam_update_time < kf_time && !flg_state_backup_available) { //check if we predicted to far previously (and if we can reset to earlier time)
+                  ROS_WARN("No state backup, forcing gtsam update with timing gap (dt = %f)", gtsam_update_time - kf_time);
                 }
-                else{
-                  ROS_WARN("Predicted too far, applying gtsam update from previous time (dt = %f)", gtsam_update_time - kf_time);
+                else if(gtsam_update_time < kf_time && flg_state_backup_available) { // necessary because we might have predicted to far previously
+                  // reset state to the last update predict again
+                  ROS_INFO("KF reset (dt = %f)", gtsam_update_time - kf_time);
+                  kf.change_x(state_backup);
+                  kf.change_P(P_backup);
+                  kf.set_time(last_update_time);
+                }
+                else { 
+                  //Nothing to do, just propagate
                 }
                 
+                p_imu->PropagateState(imu_buffer, kf, gtsam_update_time);
                 kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
-                last_update_time = kf_time;
+                // drop imu msgs which we don't need to revisit
+                p_imu->RemoveImuMsgsFromPast(imu_buffer, kf);
+                last_update_time = kf.get_time();
                 
                 state_point = kf.get_x();
                 euler_cur = SO3ToEuler(state_point.rot);
