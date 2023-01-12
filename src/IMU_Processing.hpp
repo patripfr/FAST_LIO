@@ -1,3 +1,6 @@
+#ifndef IMU_PROCESS_H
+#define IMU_PROCESS_H
+
 #include <cmath>
 #include <math.h>
 #include <deque>
@@ -177,7 +180,7 @@ void ImuProcess::IMU_init(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, esekfom
     mean_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;
   }
 
-  for (const auto &imu : imu_buffer)
+  for (const auto &imu : imu_buffer) // Assuming we have enough msgs to fill the N?
   {
     const auto &imu_acc = imu->linear_acceleration;
     const auto &gyr_acc = imu->angular_velocity;
@@ -284,7 +287,7 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
        tail->header.stamp.toSec() < last_kf_update_time) // old data 
     {
       skip_counter++;
-      ROS_WARN("KF prediction stamp ahead of imu stamp, skipping msg (%i in a row)", skip_counter);
+      ROS_WARN_THROTTLE(0.5, "KF prediction stamp ahead of imu stamp, skipping msg (%i in a row)", skip_counter);
       it_imu += 1; // this line is VERY important
       continue;
     }
@@ -292,6 +295,7 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
             tail->header.stamp.toSec() > last_kf_update_time)
     {
       dt = tail->header.stamp.toSec() - last_kf_update_time; // closing the gap to the next IMU update
+      //ROS_INFO("Closing the gap: dt = %f", dt);
     }
     else if(head->header.stamp.toSec() < target_time && 
       tail->header.stamp.toSec() > target_time) { // precisely matching the target time
@@ -450,3 +454,5 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   IMUpose.clear(); // empty after update
   IMUpose.push_back(tmp_pose);
 }
+
+#endif //IMU_PROCESS_H

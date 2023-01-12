@@ -1030,7 +1030,16 @@ void interpolate_gtsam_state(double desired_time) {
       }
   }
   // if we get here, we don't have enough msgs in the buffer!
-  ROS_WARN("Nothing to interpolate atm");
+  geometry_msgs::TransformStamped::ConstPtr last_msg = gtsam_buffer.front();
+  if(desired_time == last_msg->header.stamp.toSec()){
+    tf::vectorMsgToEigen(last_msg->transform.translation, p_ip_gtsam);
+    tf::quaternionMsgToEigen(last_msg->transform.rotation, q_ip_gtsam);
+    return;
+  }
+  else{
+      ROS_WARN("desired time is too much in the past!");
+  }
+  
 }
 
 int main(int argc, char** argv)
@@ -1250,7 +1259,7 @@ int main(int argc, char** argv)
             double solve_H_time = 0;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
             
-            // keep a backup in case the pointcloud can not be used
+            // keep a backup in case the next pointcloud can not be used
             state_backup = kf.get_x();
             P_backup = kf.get_P();
             last_update_time = kf.get_time();
@@ -1329,7 +1338,7 @@ int main(int argc, char** argv)
         }
         // if there wasn't a new lidar msg for too long
         else if(!gtsam_buffer.empty()){
-          if(latest_gtsam_msg->header.stamp.toSec() - last_update_time > lid_timeout){ // TODO parametrize minimal time to update
+          if(latest_gtsam_msg->header.stamp.toSec() - last_timestamp_lidar > lid_timeout){ // TODO parametrize minimal time to update
             flg_GTSAM_update_required = true;
             ROS_INFO_ONCE("GTSAM_update required");
           }
@@ -1360,7 +1369,7 @@ int main(int argc, char** argv)
                 
                 // check if the timing is matching
                 kf_time = kf.get_time();
-                if(gtsam_update_time < last_update_time) {
+                if(gtsam_update_time <= last_update_time) {
                   ROS_INFO_THROTTLE(0.1, "Skip gtsam update, msg from the past"); // this should not trigger at all!!
                   continue;
                 }
@@ -1410,8 +1419,8 @@ int main(int argc, char** argv)
                   gtsam_buffer.erase(gtsam_buffer.begin(), gtsam_buffer.end() - 1); // we want to keep 2 elements
               }
               
-              flg_GTSAM_update_required = false;
             }
+            flg_GTSAM_update_required = false;
         }
 
         status = ros::ok();
