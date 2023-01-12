@@ -2174,10 +2174,10 @@ public:
 		P_ = input_cov;
 	}
 
-	const state& get_x() const {
+	const state get_x() const {
 		return x_;
 	}
-	const cov& get_P() const {
+	const cov get_P() const {
 		return P_;
 	}
 	
