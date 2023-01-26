@@ -65,7 +65,7 @@
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
-#define GTSAM_COV            (0.1)
+#define GTSAM_COV           (0.0001) // this improved tracking but not fixed still!
 #define MAXN                (720000)
 #define PUBFRAME_PERIOD     (20)
 
@@ -94,7 +94,7 @@ double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0, 
        kf_time, last_update_time;
 double lid_timeout;
-int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
+int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0, update_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited = false, flg_GTSAM_update_required = false, flg_state_backup_available = false;
@@ -111,6 +111,7 @@ deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
 deque<geometry_msgs::TransformStamped::ConstPtr> gtsam_buffer;
+int gtsam_buffer_max_size = 2;
 geometry_msgs::TransformStamped::Ptr latest_gtsam_msg;
 
 V3D p_cur_gtsam;
@@ -952,17 +953,19 @@ void h_share_model_gtsam(state_ikfom &s, esekfom::dyn_share_datastruct_gtsam<dou
     Eigen::AngleAxisd a_predicted = Eigen::AngleAxisd(s.rot);
     Eigen::AngleAxisd a_predicted_prev = Eigen::AngleAxisd(state_backup.rot);
     
-    ekfom_data.h.block<3, 1>(0,0) = p_cur_gtsam - s.pos;
-    ekfom_data.h.block<3, 1>(3,0) = a_measured.angle() * a_measured.axis() 
-                                    - a_predicted.angle() * a_predicted.axis();
-    /*                                
+    //ekfom_data.h.block<3, 1>(0,0) = p_cur_gtsam - s.pos;
+    //ROS_INFO("Position error offset:(%f. %f, %f)", ekfom_data.h(0,0), ekfom_data.h(1,0), ekfom_data.h(2,0));
+    //ekfom_data.h.block<3, 1>(3,0) = a_measured.angle() * a_measured.axis()
+    //                              - a_predicted.angle() * a_predicted.axis();                    
+                                  
+    /* differential update*/
     ekfom_data.h.block<3, 1>(0,0) = (p_cur_gtsam - p_ip_gtsam) - (s.pos - state_backup.pos);
     ekfom_data.h.block<3, 1>(3,0) = 
       (a_measured.angle() * a_measured.axis() 
          - a_measured_prev.angle() * a_measured_prev.axis()) 
       -(a_predicted.angle() * a_predicted.axis()
          - a_predicted_prev.angle() * a_predicted_prev.axis());                
-`   */
+
     solve_time += omp_get_wtime() - solve_start_;
     h_x_cash = ekfom_data.h_x; // why tmp?
 }
@@ -994,11 +997,14 @@ void compute_covariances() { // Eigen vector calculation for Covariance Calculat
     cov_r = cov_r / sqrt(evalr(0));
 }
 
-void interpolate_gtsam_state(double desired_time) {
-  // walking backwards through the list
+void interpolate_gtsam_state(double desired_time, 
+    std::deque<geometry_msgs::TransformStamped::ConstPtr>::iterator update_iterator) {
+  // walking backwards through the list starting with the current update
   
-  ROS_INFO("GTSAM buffer has %i elements", gtsam_buffer.size());
-  for(auto it = gtsam_buffer.end()-1; it != gtsam_buffer.begin() + 1; it--) { // make sure we check that there is enough msgs in the buffer
+  ROS_INFO("GTSAM buffer has %li elements", gtsam_buffer.size());
+  // make sure we check that there is enough msgs in the buffer
+  
+  for(auto it = update_iterator; it != gtsam_buffer.begin() + 1; it--) { 
       geometry_msgs::TransformStamped::ConstPtr msg_ptr = *it;
       geometry_msgs::TransformStamped::ConstPtr msg_ptr_prev = *(it-1);
 
@@ -1260,7 +1266,8 @@ int main(int argc, char** argv)
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
             
             // keep a backup in case the next pointcloud can not be used
-            state_backup = kf.get_x();
+            update_count++;
+            state_backup = kf.get_x(); //TODO reset the state backup!!
             P_backup = kf.get_P();
             last_update_time = kf.get_time();
             flg_state_backup_available = true;
@@ -1331,9 +1338,9 @@ int main(int argc, char** argv)
                 dump_lio_state_to_log(fp);
             }
             
-            if(gtsam_buffer.size() > 2) {
+            if(gtsam_buffer.size() > gtsam_buffer_max_size) {
                 // we want to keep the last two!
-                gtsam_buffer.erase(gtsam_buffer.begin(), gtsam_buffer.end() - 1);
+                gtsam_buffer.erase(gtsam_buffer.begin(), gtsam_buffer.end() - 2); // erasing all except one
             }
         }
         // if there wasn't a new lidar msg for too long
@@ -1345,7 +1352,7 @@ int main(int argc, char** argv)
         }
 
         // TODO: check imu buffer (so it contains all necessary slots)
-        if(flg_GTSAM_update_required){
+        if(flg_GTSAM_update_required && update_count > 100){ // kd tree should be running more than 3 seconds
             if(gtsam_buffer.size() < 2){
               ROS_WARN_THROTTLE(0.5, "Skipping GTSAM update, not enough odometry updates (<2)");
             }
@@ -1362,7 +1369,7 @@ int main(int argc, char** argv)
               //ROS_INFO_THROTTLE(0.1,"gtsam update triggered");
               // TODO: atm we iterate over all available updates, starting the second
               for(auto it = gtsam_buffer.begin() + 1; it != gtsam_buffer.end(); it++) {
-                ROS_INFO_THROTTLE(5,"Pulling gtsam update");
+                ROS_INFO("Pulling gtsam update (seen %i lidar updates before)", update_count);
                 double gtsam_update_time = (*it)->header.stamp.toSec();
                 tf::vectorMsgToEigen((*it)->transform.translation, p_cur_gtsam);
                 tf::quaternionMsgToEigen((*it)->transform.rotation, q_cur_gtsam);
@@ -1382,7 +1389,7 @@ int main(int argc, char** argv)
                   ROS_WARN("KF reset (dt = %f)", gtsam_update_time - kf_time);
                   kf.change_x(state_backup);
                   kf.change_P(P_backup);
-                  kf.set_time(last_update_time);
+                  kf.set_time(last_update_time); // TODO: FiX THIS!!, troubles with the relative update!
                 }
                 else { 
                   //Nothing to do, just propagate

@@ -350,7 +350,7 @@ void ImuProcess::RemoveImuMsgsFromPast(deque<sensor_msgs::Imu::ConstPtr> &imu_bu
   auto it_imu = imu_buffer.begin();
   double kf_time = kf_state.get_time();
   
-  while(it_imu < (imu_buffer.end() - 1)) // we always want to keep the last msg!
+  while(it_imu < (imu_buffer.end() - 1)) // we always want to keep the last msg for interpolation with the next one!
   {
     auto &&msg = *(it_imu);
     
@@ -360,7 +360,7 @@ void ImuProcess::RemoveImuMsgsFromPast(deque<sensor_msgs::Imu::ConstPtr> &imu_bu
     }
 
     // remove head element and set the pointer one further
-    it_imu = imu_buffer.erase(it_imu); // how shall we keep this while not erasing it all?
+    it_imu = imu_buffer.erase(it_imu); 
   }
 }
 
@@ -373,7 +373,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   
   // move IMUpose to the start of the Lidar measurement window
   if(IMUpose.empty()){
-    ROS_ERROR("IMUpose buffer empty");
+    ROS_ERROR("IMUpose buffer empty, undistortion aborted");
     return;
   }
   
