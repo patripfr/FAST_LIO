@@ -341,7 +341,6 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
     
     if(t >= target_time){ // TODO integrate this more nicely
       break;
-      ROS_INFO("Prediction sucess");
     }
   }
 }
