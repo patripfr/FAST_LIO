@@ -4,6 +4,8 @@
     <arg name="mav_name" default="kolibri"/>
     <arg name="rviz" default="false" />
     <arg name="node_start_delay" default="10.0" />
+    <arg name="record_bag" default="true" />
+    <arg name="target_bag" default="test" />
 
       <!-- Rosbag replay:
             2022-09-06-17-21-21_slight_drift_allmend.bag
@@ -14,7 +16,7 @@
     <!---->
     <group ns="$(arg mav_name)">
 
-      <node pkg="rosbag" type="play"
+      <node pkg="rosbag" type="play" required="true"
             name="replay" args="
               $(arg bag_name) 
               /alphasense_driver_ros/imu:=/kolibri/alphasense_driver_ros/imu
@@ -23,7 +25,20 @@
               ">
         <param name="capability_group" value="10 LIO replay"/>
       </node>
-
+      
+      
+      <!-- recorder -->
+      <node pkg="rosbag" type="record"
+            name="record"  args="
+              -O $(env HOME)/bags/gtsam_fusion/$(arg target_bag) 
+              /Odometry 
+              /kolibri/transform_flu 
+              /kolibri/mavros/local_position/pose 
+              /kolibri/mav_state_estimator/optimization 
+              /debug/odom
+              ">
+      </node>
+      
       <!-- applied params from kolibri_subt_hw -->
       <rosparam file="$(find mav_startup)/parameters/mavs/kolibri/fast_lio/ouster_os0.yaml" command="load"/>
 

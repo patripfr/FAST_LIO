@@ -640,6 +640,21 @@ void set_posestamp(T & out)
     out.pose.orientation.w = geoQuat.w;
 
 }
+void publish_debug_odometry(const ros::Publisher & debug_pub)
+{
+  nav_msgs::Odometry debug_msg;
+  debug_msg.header.frame_id = "odom";
+  debug_msg.child_frame_id = "body";
+  debug_msg.header.stamp = ros::Time().fromSec(kf.get_time());
+  
+  auto tmp_state = kf.get_x();  
+  tf::pointEigenToMsg(tmp_state.pos, debug_msg.pose.pose.position);
+  
+  Eigen::Quaterniond q(tmp_state.rot);
+  tf::quaternionEigenToMsg(q, debug_msg.pose.pose.orientation);
+  
+  debug_pub.publish(debug_msg);  
+}
 
 void publish_odometry(const ros::Publisher & pubOdomAftMapped)
 {
@@ -1004,7 +1019,7 @@ void interpolate_gtsam_state(double desired_time,
   ROS_INFO("GTSAM buffer has %li elements", gtsam_buffer.size());
   // make sure we check that there is enough msgs in the buffer
   
-  for(auto it = update_iterator; it != gtsam_buffer.begin() + 1; it--) { 
+  for(auto it = update_iterator; it != gtsam_buffer.begin(); it--) {  // we should stop at the last one (not 2!)
       geometry_msgs::TransformStamped::ConstPtr msg_ptr = *it;
       geometry_msgs::TransformStamped::ConstPtr msg_ptr_prev = *(it-1);
 
@@ -1161,6 +1176,9 @@ int main(int argc, char** argv)
             ("/path", 100000);
     maplab_pub = nh.advertise<maplab_msgs::OdometryWithImuBiases>
             ("/fastlio2/odom", 100000);
+            
+    ros::Publisher debug_pub = nh.advertise<nav_msgs::Odometry>
+            ("/debug/odom", 100000);
 //------------------------------------------------------------------------------------------------------
     signal(SIGINT, SigHandle);
     ros::Rate rate(5000);
@@ -1188,7 +1206,8 @@ int main(int argc, char** argv)
             t0 = omp_get_wtime();
             
             p_imu->PropagateState(imu_buffer, kf, lidar_end_time);
-            p_imu->UndistortPcl(Measures, kf, *feats_undistort); 
+            //publish_debug_odometry(debug_pub);
+            p_imu->UndistortPcl(Measures, kf, *feats_undistort);
             state_point = kf.get_x(); // todo check if initialized
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
@@ -1352,7 +1371,7 @@ int main(int argc, char** argv)
         }
 
         // TODO: check imu buffer (so it contains all necessary slots)
-        if(flg_GTSAM_update_required && update_count > 100){ // kd tree should be running more than 3 seconds
+        if(flg_GTSAM_update_required && update_count > 80){ // kd tree should be running more than 3 seconds
             if(gtsam_buffer.size() < 2){
               ROS_WARN_THROTTLE(0.5, "Skipping GTSAM update, not enough odometry updates (<2)");
             }
@@ -1394,10 +1413,11 @@ int main(int argc, char** argv)
                 else { 
                   //Nothing to do, just propagate
                 }
-                
-                interpolate_gtsam_state(last_update_time);
+                //ROS_INFO("Before propagate (gtsam)");
+                interpolate_gtsam_state(last_update_time, it);
                 p_imu->PropagateState(imu_buffer, kf, gtsam_update_time);
-                
+
+                ROS_INFO("GTSAM update at: %f", kf.get_time());
                 //TODO: check time stamps to make sure we state propagation worked?
                 kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
                 // drop imu msgs which we don't need to revisit
@@ -1417,9 +1437,9 @@ int main(int argc, char** argv)
                 
                 compute_covariances();
 
-                //TODO: may introduce separate publisher to observe state but not confuse GTSAM
-                // GTSAM might get overconfident with the state?
-                publish_odometry(pubOdomAftMapped);
+                //publish_odometry(pubOdomAftMapped);
+                publish_debug_odometry(debug_pub);
+
               }
               
               if(gtsam_buffer.size() > 1) {
@@ -1428,6 +1448,10 @@ int main(int argc, char** argv)
               
             }
             flg_GTSAM_update_required = false;
+        }
+        else if(flg_GTSAM_update_required) {
+          ROS_INFO_THROTTLE(1,"Not seen enough lidar msgs at the beginning (update_count %i)", update_count);
+          flg_GTSAM_update_required = false;
         }
 
         status = ros::ok();
