@@ -40,7 +40,7 @@
       </node>
       
       <!-- applied params from kolibri_subt_hw -->
-      <rosparam file="$(find mav_startup)/parameters/mavs/kolibri/fast_lio/ouster_os0.yaml" command="load"/>
+      <rosparam file="$(find fast_lio)/config/ouster_os0.yaml" command="load"/>
 
       <param name="feature_extract_enable" type="bool" value="0"/>
       <param name="point_filter_num" type="int" value="2"/>

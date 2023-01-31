@@ -1033,6 +1033,7 @@ void interpolate_gtsam_state(double desired_time,
       if (msg_time == desired_time) {
         tf::vectorMsgToEigen(msg_ptr->transform.translation, p_ip_gtsam);
         tf::quaternionMsgToEigen(msg_ptr->transform.rotation, q_ip_gtsam);
+        //ROS_INFO("Found the perfect time %f", msg_time);
         return;
       }
       else if(msg_time > desired_time && msg_time_prev < desired_time) {
@@ -1220,7 +1221,7 @@ int main(int argc, char** argv)
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
                 ROS_WARN("No point, skip this scan!\n");
-                flg_GTSAM_update_required = true;
+                //flg_GTSAM_update_required = true;
                 continue;
             }
 
@@ -1257,8 +1258,8 @@ int main(int argc, char** argv)
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
-                ROS_WARN("No point, skip this scan!\n");
-                flg_GTSAM_update_required = true;
+                ROS_WARN("Less than 5 points, skip this scan!\n");
+                //flg_GTSAM_update_required = true;
 
                 continue;
             }
@@ -1296,6 +1297,7 @@ int main(int argc, char** argv)
             P_backup = kf.get_P();
             last_update_time = kf.get_time();
             flg_state_backup_available = true;
+            //ROS_INFO("Lidar update at: %f", kf.get_time());
 
             // empty IMU buffer here until kf_time (lidar_end_time) or lidar_beg_time
             p_imu->RemoveImuMsgsFromPast(imu_buffer, kf);
