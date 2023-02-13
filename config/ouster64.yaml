@@ -1,8 +1,6 @@
 common:
     lid_topic:  "/os_cloud_node/points"
-    imu_topic:  "/alphasense_driver_ros/imu"
-    gtsam_topic: "/mav_state_estimator/optimization"
-    lid_timeout: 1.0
+    imu_topic: "/os_cloud_node/imu"
     time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
 
 preprocess:

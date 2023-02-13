@@ -65,7 +65,6 @@
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
-#define GTSAM_COV           (0.000001) // very small number, but fixes the issue!
 #define MAXN                (720000)
 #define PUBFRAME_PERIOD     (20)
 
@@ -85,15 +84,15 @@ mutex mtx_buffer;
 condition_variable sig_buffer;
 
 string root_dir = ROOT_DIR;
-string map_file_path, lid_topic, imu_topic, gtsam_topic;
+string map_file_path, lid_topic, imu_topic, ext_odom_topic;
 
 double res_mean_last = 0.05, total_residual = 0.0;
-double last_timestamp_lidar = 0, last_timestamp_imu = -1.0, last_timestamp_gtsam = -1.0;
+double last_timestamp_lidar = 0, last_timestamp_imu = -1.0, last_timestamp_ext_odom = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0, 
        kf_time, last_update_time;
-double lid_timeout;
+double lid_timeout, ext_odom_cov;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0, update_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
@@ -169,7 +168,7 @@ Eigen::MatrixXd cov;
 bool init = false;
 Eigen::Quaterniond grav_q;
 std::string imu_frame;
-std::string gtsam_frame;
+std::string ext_odom_frame;
 
 bool grav_align = false;
 bool pub_cov = false;
@@ -408,8 +407,8 @@ bool   timediff_gtsam_set_flg = false;
 
 void gtsam_cbk(const geometry_msgs::TransformStamped::ConstPtr &msg_in)
 {
-    if (gtsam_frame.empty()) {
-      gtsam_frame = msg_in->header.frame_id;
+    if (ext_odom_frame.empty()) {
+      ext_odom_frame = msg_in->header.frame_id;
     }
 
     geometry_msgs::TransformStamped::Ptr msg(new geometry_msgs::TransformStamped(*msg_in));
@@ -418,13 +417,13 @@ void gtsam_cbk(const geometry_msgs::TransformStamped::ConstPtr &msg_in)
 
     mtx_buffer.lock();
 
-    if (timestamp < last_timestamp_gtsam)
+    if (timestamp < last_timestamp_ext_odom)
     {
         ROS_WARN("gtsam loop back, clear buffer");
         gtsam_buffer.clear();
     }
 
-    last_timestamp_gtsam = timestamp;
+    last_timestamp_ext_odom = timestamp;
 
     gtsam_buffer.push_back(msg);
     latest_gtsam_msg = msg;
@@ -1085,8 +1084,11 @@ int main(int argc, char** argv)
     nh.param<string>("map_file_path",map_file_path,"");
     nh.param<string>("common/lid_topic",lid_topic,"/livox/lidar");
     nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
+    nh.param<string>("common/ext_odom_topic", ext_odom_topic, "ext_odom");
+
     nh.param<double>("common/lid_timeout", lid_timeout, 1.0);
-    nh.param<string>("common/gtsam_topic", gtsam_topic, "gtsam");
+    nh.param<double>("common/ext_odom_cov", ext_odom_cov, 0.000001);
+    
 
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
     nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);
@@ -1168,7 +1170,7 @@ int main(int argc, char** argv)
     ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>
             ("/Odometry", 100000);
     ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
-    ros::Subscriber sub_gtsam = nh.subscribe(gtsam_topic, 200000, gtsam_cbk);
+    ros::Subscriber sub_gtsam = nh.subscribe(ext_odom_topic, 200000, gtsam_cbk);
 
     ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>
             ("/cloud_registered", 100000);
@@ -1421,13 +1423,12 @@ int main(int argc, char** argv)
                 else { 
                   //Nothing to do, just propagate
                 }
-                //ROS_INFO("Before propagate (gtsam)");
+                // interpolate state for relative update
                 interpolate_gtsam_state(last_update_time, it);
                 p_imu->PropagateState(imu_buffer, kf, gtsam_update_time);
-
-                ROS_INFO("GTSAM update at: %f", kf.get_time());
-                //TODO: check time stamps to make sure we state propagation worked?
-                kf.update_iterated_dyn_share_modified_gtsam(GTSAM_COV, solve_H_time_gtsam); // here the iterated pose estimate is happening
+                // perform measurement update
+                kf.update_iterated_dyn_share_modified_gtsam(ext_odom_cov, solve_H_time_gtsam); // here the iterated pose estimate is happening
+                
                 // drop imu msgs which we don't need to revisit
                 p_imu->RemoveImuMsgsFromPast(imu_buffer, kf);
                 
