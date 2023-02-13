@@ -96,7 +96,7 @@ double lid_timeout, ext_odom_cov;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0, update_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
-bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited = false, flg_GTSAM_update_required = false, flg_state_backup_available = false;
+bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited = false, flg_EXT_ODOM_update_required = false, flg_state_backup_available = false;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 
 
@@ -109,16 +109,16 @@ vector<double>       extrinR(9, 0.0);
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
-deque<geometry_msgs::TransformStamped::ConstPtr> gtsam_buffer;
-int gtsam_buffer_max_size = 2;
+deque<geometry_msgs::TransformStamped::ConstPtr> ext_odom_buffer;
+int ext_odom_buffer_max_size = 2;
 int min_lidar_updates = 80;
-geometry_msgs::TransformStamped::Ptr latest_gtsam_msg;
+geometry_msgs::TransformStamped::Ptr latest_ext_odom_msg;
 
-V3D p_cur_gtsam;
-V3D p_ip_gtsam;
+V3D p_cur_ext_odom;
+V3D p_ip_ext_odom;
 
-Eigen::Quaternion<double> q_cur_gtsam;
-Eigen::Quaternion<double> q_ip_gtsam;
+Eigen::Quaternion<double> q_cur_ext_odom;
+Eigen::Quaternion<double> q_ip_ext_odom;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -402,10 +402,10 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     sig_buffer.notify_all();
 }
 
-double timediff_gtsam_wrt_imu = 0.0;
-bool   timediff_gtsam_set_flg = false;
+double timediff_ext_odom_wrt_imu = 0.0;
+bool   timediff_ext_odom_set_flg = false;
 
-void gtsam_cbk(const geometry_msgs::TransformStamped::ConstPtr &msg_in)
+void ext_odom_cbk(const geometry_msgs::TransformStamped::ConstPtr &msg_in)
 {
     if (ext_odom_frame.empty()) {
       ext_odom_frame = msg_in->header.frame_id;
@@ -419,14 +419,14 @@ void gtsam_cbk(const geometry_msgs::TransformStamped::ConstPtr &msg_in)
 
     if (timestamp < last_timestamp_ext_odom)
     {
-        ROS_WARN("gtsam loop back, clear buffer");
-        gtsam_buffer.clear();
+        ROS_WARN("ext_odom loop back, clear buffer");
+        ext_odom_buffer.clear();
     }
 
     last_timestamp_ext_odom = timestamp;
 
-    gtsam_buffer.push_back(msg);
-    latest_gtsam_msg = msg;
+    ext_odom_buffer.push_back(msg);
+    latest_ext_odom_msg = msg;
 
     mtx_buffer.unlock();
     sig_buffer.notify_all();
@@ -963,7 +963,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     h_x_cash = temp_h;
 }
 
-void h_share_model_gtsam(state_ikfom &s, esekfom::dyn_share_datastruct_gtsam<double> &ekfom_data)
+void h_share_model_ext(state_ikfom &s, esekfom::dyn_share_datastruct_ext<double> &ekfom_data)
 {
     double solve_start_ = omp_get_wtime();
 
@@ -971,13 +971,13 @@ void h_share_model_gtsam(state_ikfom &s, esekfom::dyn_share_datastruct_gtsam<dou
     ekfom_data.h_x = MatrixXd::Zero(6, 12); //2
     ekfom_data.h_x.block<6, 6>(0,0) = MatrixXd::Identity(6,6);
     
-    Eigen::AngleAxisd a_measured = Eigen::AngleAxisd(q_cur_gtsam);
-    Eigen::AngleAxisd a_measured_prev = Eigen::AngleAxisd(q_ip_gtsam);
+    Eigen::AngleAxisd a_measured = Eigen::AngleAxisd(q_cur_ext_odom);
+    Eigen::AngleAxisd a_measured_prev = Eigen::AngleAxisd(q_ip_ext_odom);
     Eigen::AngleAxisd a_predicted = Eigen::AngleAxisd(s.rot);
     Eigen::AngleAxisd a_predicted_prev = Eigen::AngleAxisd(state_backup.rot);
     
     /* differential update*/
-    ekfom_data.h.block<3, 1>(0,0) = (p_cur_gtsam - p_ip_gtsam) - (s.pos - state_backup.pos);
+    ekfom_data.h.block<3, 1>(0,0) = (p_cur_ext_odom - p_ip_ext_odom) - (s.pos - state_backup.pos);
     ekfom_data.h.block<3, 1>(3,0) = 
       (a_measured.angle() * a_measured.axis() 
          - a_measured_prev.angle() * a_measured_prev.axis()) 
@@ -1015,14 +1015,10 @@ void compute_covariances() { // Eigen vector calculation for Covariance Calculat
     cov_r = cov_r / sqrt(evalr(0));
 }
 
-void interpolate_gtsam_state(double desired_time, 
+void interpolate_ext_odom_state(double desired_time, 
     std::deque<geometry_msgs::TransformStamped::ConstPtr>::iterator update_iterator) {
-  // walking backwards through the list starting with the current update
-  
-  //ROS_INFO("GTSAM buffer has %li elements", gtsam_buffer.size());
-  // make sure we check that there is enough msgs in the buffer
-  
-  for(auto it = update_iterator; it != gtsam_buffer.begin(); it--) {  // we should stop at the last one (not 2!)
+  // walking backwards through the list starting with the current update  
+  for(auto it = update_iterator; it != ext_odom_buffer.begin(); it--) {  // we should stop at the last one (not 2!)
       geometry_msgs::TransformStamped::ConstPtr msg_ptr = *it;
       geometry_msgs::TransformStamped::ConstPtr msg_ptr_prev = *(it-1);
 
@@ -1030,8 +1026,8 @@ void interpolate_gtsam_state(double desired_time,
       double msg_time_prev = msg_ptr_prev->header.stamp.toSec();
     
       if (msg_time == desired_time) {
-        tf::vectorMsgToEigen(msg_ptr->transform.translation, p_ip_gtsam);
-        tf::quaternionMsgToEigen(msg_ptr->transform.rotation, q_ip_gtsam);
+        tf::vectorMsgToEigen(msg_ptr->transform.translation, p_ip_ext_odom);
+        tf::quaternionMsgToEigen(msg_ptr->transform.rotation, q_ip_ext_odom);
         //ROS_INFO("Found the perfect time %f", msg_time);
         return;
       }
@@ -1048,19 +1044,19 @@ void interpolate_gtsam_state(double desired_time,
         tf::vectorMsgToEigen(msg_ptr->transform.translation, p_curr);
         tf::quaternionMsgToEigen(msg_ptr->transform.rotation, q_curr);
         
-        p_ip_gtsam = p_prev * (1 - fraction) + p_curr * (fraction);   
-        q_ip_gtsam = q_prev.slerp(fraction, q_curr);
+        p_ip_ext_odom = p_prev * (1 - fraction) + p_curr * (fraction);   
+        q_ip_ext_odom = q_prev.slerp(fraction, q_curr);
        
         return;
       }
   }
   
   // checking the last msg
-  geometry_msgs::TransformStamped::ConstPtr last_msg = gtsam_buffer.front();
+  geometry_msgs::TransformStamped::ConstPtr last_msg = ext_odom_buffer.front();
   if(desired_time == last_msg->header.stamp.toSec()){
-    //ROS_INFO("Taking oldest available gtsam msg, (matching the required time)");
-    tf::vectorMsgToEigen(last_msg->transform.translation, p_ip_gtsam);
-    tf::quaternionMsgToEigen(last_msg->transform.rotation, q_ip_gtsam);
+    //ROS_INFO("Taking oldest available ext_odom msg, (matching the required time)");
+    tf::vectorMsgToEigen(last_msg->transform.translation, p_ip_ext_odom);
+    tf::quaternionMsgToEigen(last_msg->transform.rotation, q_ip_ext_odom);
     return;
   }
   else{
@@ -1147,7 +1143,7 @@ int main(int argc, char** argv)
 
     double epsi[23] = {0.001};
     fill(epsi, epsi+23, 0.001);
-    kf.init_dyn_share_multi(get_f, df_dx, df_dw, h_share_model, h_share_model_gtsam, NUM_MAX_ITERATIONS, epsi);
+    kf.init_dyn_share_multi(get_f, df_dx, df_dw, h_share_model, h_share_model_ext, NUM_MAX_ITERATIONS, epsi);
 
     /*** debug record ***/
     FILE *fp;
@@ -1170,7 +1166,7 @@ int main(int argc, char** argv)
     ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>
             ("/Odometry", 100000);
     ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
-    ros::Subscriber sub_gtsam = nh.subscribe(ext_odom_topic, 200000, gtsam_cbk);
+    ros::Subscriber sub_ext_odom = nh.subscribe(ext_odom_topic, 200000, ext_odom_cbk);
 
     ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>
             ("/cloud_registered", 100000);
@@ -1223,7 +1219,7 @@ int main(int argc, char** argv)
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
                 ROS_WARN("No point, skip this scan!\n");
-                //flg_GTSAM_update_required = true;
+                //flg_EXT_ODOM_update_required = true;
                 continue;
             }
 
@@ -1261,7 +1257,7 @@ int main(int argc, char** argv)
             if (feats_down_size < 5)
             {
                 ROS_WARN("Less than 5 points, skip this scan!\n");
-                //flg_GTSAM_update_required = true;
+                //flg_EXT_ODOM_update_required = true;
 
                 continue;
             }
@@ -1367,55 +1363,55 @@ int main(int argc, char** argv)
                 dump_lio_state_to_log(fp);
             }
             
-            if(gtsam_buffer.size() > gtsam_buffer_max_size) {
+            if(ext_odom_buffer.size() > ext_odom_buffer_max_size) {
                 // we want to keep the last two!
-                gtsam_buffer.erase(gtsam_buffer.begin(), gtsam_buffer.end() - 2); // erasing all except two
+                ext_odom_buffer.erase(ext_odom_buffer.begin(), ext_odom_buffer.end() - 2); // erasing all except two
             }
         }
         // if there wasn't a new lidar msg for too long
-        else if(!gtsam_buffer.empty()){
-          if(latest_gtsam_msg->header.stamp.toSec() - last_timestamp_lidar > lid_timeout){ // TODO parametrize minimal time to update
-            flg_GTSAM_update_required = true;
-            ROS_INFO_ONCE("GTSAM_update required");
+        else if(!ext_odom_buffer.empty()){
+          if(latest_ext_odom_msg->header.stamp.toSec() - last_timestamp_lidar > lid_timeout){ // TODO parametrize minimal time to update
+            flg_EXT_ODOM_update_required = true;
+            ROS_INFO_ONCE("EXT_ODOM_update required");
           }
         }
 
         // TODO: check imu buffer (so it contains all necessary slots)
-        if(flg_GTSAM_update_required && update_count > min_lidar_updates){ // tree should have some points already!
-            if(gtsam_buffer.size() < 2){
-              ROS_WARN_THROTTLE(0.5, "Skipping GTSAM update, not enough odometry updates (<2)");
+        if(flg_EXT_ODOM_update_required && update_count > min_lidar_updates){ // tree should have some points already!
+            if(ext_odom_buffer.size() < 2){
+              ROS_WARN_THROTTLE(0.5, "Skipping EXT_ODOM update, not enough odometry updates (<2)");
             }
             else if(imu_buffer.empty()){
-              ROS_WARN_THROTTLE(0.5, "Skipping GTSAM update, No imu msgs for GTSAM update");
+              ROS_WARN_THROTTLE(0.5, "Skipping EXT_ODOM update, No imu msgs for EXT_ODOM update");
             }
             else if(!p_imu->is_initialized())
             {
-              ROS_WARN_THROTTLE(0.5, "Skipping GTSAM update, Imu state not initialized");
+              ROS_WARN_THROTTLE(0.5, "Skipping EXT_ODOM update, Imu state not initialized");
             }
-            else // do the update(s)
+            else // do the update(s), all good
             {
-              double solve_H_time_gtsam;
-              //ROS_INFO_THROTTLE(0.1,"gtsam update triggered");
+              double solve_H_time_ext_odom;
+              //ROS_INFO_THROTTLE(0.1,"ext_odom update triggered");
               // TODO: atm we iterate over all available updates, starting the second
-              for(auto it = gtsam_buffer.begin() + 1; it != gtsam_buffer.end(); it++) {
-                //ROS_INFO("Pulling gtsam update (seen %i lidar updates before)", update_count);
-                double gtsam_update_time = (*it)->header.stamp.toSec();
-                tf::vectorMsgToEigen((*it)->transform.translation, p_cur_gtsam);
-                tf::quaternionMsgToEigen((*it)->transform.rotation, q_cur_gtsam);
+              for(auto it = ext_odom_buffer.begin() + 1; it != ext_odom_buffer.end(); it++) {
+                //ROS_INFO("Pulling ext_odom update (seen %i lidar updates before)", update_count);
+                double ext_odom_update_time = (*it)->header.stamp.toSec();
+                tf::vectorMsgToEigen((*it)->transform.translation, p_cur_ext_odom);
+                tf::quaternionMsgToEigen((*it)->transform.rotation, q_cur_ext_odom);
                 
                 // check if the timing is matching
                 kf_time = kf.get_time();
-                if(gtsam_update_time <= last_update_time) {
-                  ROS_INFO("Skip gtsam update, msg from the past (t_msg = %f)", gtsam_update_time);
+                if(ext_odom_update_time <= last_update_time) {
+                  ROS_INFO("Skip ext_odom update, msg from the past (t_msg = %f)", ext_odom_update_time);
                   continue;
                 }
-                else if(gtsam_update_time < kf_time && !flg_state_backup_available) { //check if we predicted to far previously (and if we can reset to earlier time)
-                  ROS_WARN("No state backup, forcing gtsam update with timing gap (dt = %f)", gtsam_update_time - kf_time);
+                else if(ext_odom_update_time < kf_time && !flg_state_backup_available) { //check if we predicted to far previously (and if we can reset to earlier time)
+                  ROS_WARN("No state backup, forcing ext_odom update with timing gap (dt = %f)", ext_odom_update_time - kf_time);
                   continue;
                 }
-                else if(gtsam_update_time < kf_time && flg_state_backup_available) { // necessary because we might have predicted to far previously
+                else if(ext_odom_update_time < kf_time && flg_state_backup_available) { // necessary because we might have predicted to far previously
                   // reset state to the last update predict again
-                  ROS_WARN("KF reset (dt = %f)", gtsam_update_time - kf_time);
+                  ROS_WARN("KF reset (dt = %f)", ext_odom_update_time - kf_time);
                   kf.change_x(state_backup);
                   kf.change_P(P_backup);
                   kf.set_time(last_update_time); // TODO: FiX THIS!!, troubles with the relative update!
@@ -1424,10 +1420,10 @@ int main(int argc, char** argv)
                   //Nothing to do, just propagate
                 }
                 // interpolate state for relative update
-                interpolate_gtsam_state(last_update_time, it);
-                p_imu->PropagateState(imu_buffer, kf, gtsam_update_time);
+                interpolate_ext_odom_state(last_update_time, it);
+                p_imu->PropagateState(imu_buffer, kf, ext_odom_update_time);
                 // perform measurement update
-                kf.update_iterated_dyn_share_modified_gtsam(ext_odom_cov, solve_H_time_gtsam); // here the iterated pose estimate is happening
+                kf.update_iterated_dyn_share_modified_ext(ext_odom_cov, solve_H_time_ext_odom); // here the iterated pose estimate is happening
                 
                 // drop imu msgs which we don't need to revisit
                 p_imu->RemoveImuMsgsFromPast(imu_buffer, kf);
@@ -1452,16 +1448,16 @@ int main(int argc, char** argv)
 
               }
               
-              if(gtsam_buffer.size() > 1) {
-                  gtsam_buffer.erase(gtsam_buffer.begin(), gtsam_buffer.end() - 1); // we want to keep 2 elements
+              if(ext_odom_buffer.size() > 1) {
+                  ext_odom_buffer.erase(ext_odom_buffer.begin(), ext_odom_buffer.end() - 1); // we want to keep 2 elements
               }
               
             }
-            flg_GTSAM_update_required = false;
+            flg_EXT_ODOM_update_required = false;
         }
-        else if(flg_GTSAM_update_required) {
+        else if(flg_EXT_ODOM_update_required) {
           ROS_INFO_THROTTLE(1,"Not seen enough lidar msgs at the beginning (update_count %i)", update_count);
-          flg_GTSAM_update_required = false;
+          flg_EXT_ODOM_update_required = false;
         }
 
         status = ros::ok();

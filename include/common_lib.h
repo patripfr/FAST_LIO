@@ -7,8 +7,6 @@
 #include <pcl/point_cloud.h>
 #include <fast_lio/Pose6D.h>
 #include <sensor_msgs/Imu.h>
-#include <sensor_msgs/NavSatFix.h>
-#include <geometry_msgs/TwistWithCovarianceStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <tf/transform_broadcaster.h>
 #include <eigen_conversions/eigen_msg.h>
