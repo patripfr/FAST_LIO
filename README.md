@@ -77,11 +77,15 @@ Clone the repository and catkin_make:
 
 ```
     cd ~/$A_ROS_DIR$/src
+    git clone git@github.com:catkin/catkin_simple.git 
+    git clone git@github.com:ethz-asl/maplab_msgs.git
+    catkin build catkin_simple maplab_msgs
+    
     git clone https://github.com/hku-mars/FAST_LIO.git
     cd FAST_LIO
     git submodule update --init
     cd ../..
-    catkin_make
+    catkin build fast_lio
     source devel/setup.bash
 ```
 - Remember to source the livox_ros_driver before build (follow 1.3 **livox_ros_driver**)

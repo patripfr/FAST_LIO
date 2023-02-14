@@ -56,13 +56,13 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
 {
     MeasureGroup()
     {
-        lidar_beg_time = 0.0;
+        lidar_beg_time = -1.0;
+        lidar_end_time = -1.0;
         this->lidar.reset(new PointCloudXYZI());
     };
     double lidar_beg_time;
     double lidar_end_time;
     PointCloudXYZI::Ptr lidar;
-    deque<sensor_msgs::Imu::ConstPtr> imu;
 };
 
 struct StatesGroup
@@ -170,7 +170,7 @@ auto set_pose6d(const double t, const Matrix<T, 3, 1> &a, const Matrix<T, 3, 1> 
                 const Matrix<T, 3, 1> &v, const Matrix<T, 3, 1> &p, const Matrix<T, 3, 3> &R)
 {
     Pose6D rot_kp;
-    rot_kp.offset_time = t;
+    rot_kp.time = t;
     for (int i = 0; i < 3; i++)
     {
         rot_kp.acc[i] = a(i);

@@ -1,3 +1,6 @@
+#ifndef PREPROCESS_CPP
+#define PREPROCESS_CPP
+
 #include "preprocess.h"
 
 #define RETURN0     0x00
@@ -1005,3 +1008,5 @@ bool Preprocess::edge_jump_judge(const PointCloudXYZI &pl, vector<orgtype> &type
 
   return true;
 }
+
+#endif

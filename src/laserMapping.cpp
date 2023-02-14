@@ -55,6 +55,8 @@
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
 #include <geometry_msgs/Vector3.h>
+#include <geometry_msgs/PointStamped.h>
+#include <geometry_msgs/TwistWithCovarianceStamped.h>
 #include <livox_ros_driver/CustomMsg.h>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
@@ -81,17 +83,19 @@ mutex mtx_buffer;
 condition_variable sig_buffer;
 
 string root_dir = ROOT_DIR;
-string map_file_path, lid_topic, imu_topic;
+string map_file_path, lid_topic, imu_topic, ext_odom_topic;
 
 double res_mean_last = 0.05, total_residual = 0.0;
-double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
+double last_timestamp_lidar = 0, last_timestamp_imu = -1.0, last_timestamp_ext_odom = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
-double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
-int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
+double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0, 
+       kf_time, last_update_time;
+double lid_timeout, ext_odom_cov;
+int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0, update_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
-bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
+bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited = false, flg_EXT_ODOM_update_required = false, flg_state_backup_available = false;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 
 
@@ -100,9 +104,20 @@ vector<BoxPointType> cub_needrm;
 vector<PointVector>  Nearest_Points;
 vector<double>       extrinT(3, 0.0);
 vector<double>       extrinR(9, 0.0);
+
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::Imu::ConstPtr> imu_buffer;
+deque<geometry_msgs::TransformStamped::ConstPtr> ext_odom_buffer;
+int ext_odom_buffer_max_size = 2;
+int min_lidar_updates = 50; // making sure the ikd tree is initialized
+geometry_msgs::TransformStamped::Ptr latest_ext_odom_msg;
+
+V3D p_cur_ext_odom;
+V3D p_ip_ext_odom;
+
+Eigen::Quaternion<double> q_cur_ext_odom;
+Eigen::Quaternion<double> q_ip_ext_odom;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -128,7 +143,13 @@ M3D Lidar_R_wrt_IMU(Eye3d);
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
 esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
+deque<state_ikfom> state_buffer;
+deque<double> update_time_buffer;
+
 state_ikfom state_point;
+state_ikfom state_backup;
+esekfom::esekf<state_ikfom, 12, input_ikfom>::cov P_backup;
+
 vect3 pos_lid;
 
 nav_msgs::Path path;
@@ -146,6 +167,8 @@ Eigen::MatrixXd cov;
 bool init = false;
 Eigen::Quaterniond grav_q;
 std::string imu_frame;
+std::string ext_odom_frame;
+
 bool grav_align = false;
 bool pub_cov = false;
 Eigen::Vector3d last_pos;
@@ -378,11 +401,39 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     sig_buffer.notify_all();
 }
 
+void ext_odom_cbk(const geometry_msgs::TransformStamped::ConstPtr &msg_in)
+{
+    if (ext_odom_frame.empty()) {
+      ext_odom_frame = msg_in->header.frame_id;
+    }
+
+    geometry_msgs::TransformStamped::Ptr msg(new geometry_msgs::TransformStamped(*msg_in));
+
+    double timestamp = msg->header.stamp.toSec();
+
+    mtx_buffer.lock();
+
+    if (timestamp < last_timestamp_ext_odom)
+    {
+        ROS_WARN("ext_odom loop back, clear buffer");
+        ext_odom_buffer.clear();
+    }
+
+    last_timestamp_ext_odom = timestamp;
+
+    ext_odom_buffer.push_back(msg);
+    latest_ext_odom_msg = msg;
+
+    mtx_buffer.unlock();
+    sig_buffer.notify_all();
+
+}
+
 double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
-bool sync_packages(MeasureGroup &meas)
+bool prepareLidar(MeasureGroup &meas)
 {
-    if (lidar_buffer.empty() || imu_buffer.empty()) {
+    if (lidar_buffer.empty()) {
         return false;
     }
 
@@ -412,20 +463,10 @@ bool sync_packages(MeasureGroup &meas)
         lidar_pushed = true;
     }
 
-    if (last_timestamp_imu < lidar_end_time)
+    // returing if we don't have enough IMU timestamps
+    if (last_timestamp_imu < lidar_end_time) 
     {
         return false;
-    }
-
-    /*** push imu data, and pop from imu buffer ***/
-    double imu_time = imu_buffer.front()->header.stamp.toSec();
-    meas.imu.clear();
-    while ((!imu_buffer.empty()) && (imu_time < lidar_end_time))
-    {
-        imu_time = imu_buffer.front()->header.stamp.toSec();
-        if(imu_time > lidar_end_time) break;
-        meas.imu.push_back(imu_buffer.front());
-        imu_buffer.pop_front();
     }
 
     lidar_buffer.pop_front();
@@ -596,16 +637,40 @@ void set_posestamp(T & out)
     out.pose.orientation.w = geoQuat.w;
 
 }
+void publish_debug_odometry(const ros::Publisher & debug_pub)
+{
+  nav_msgs::Odometry debug_msg;
+  debug_msg.header.frame_id = "odom";
+  debug_msg.child_frame_id = "body";
+  debug_msg.header.stamp = ros::Time().fromSec(kf.get_time());
+  
+  auto tmp_state = kf.get_x();  
+  
+  Eigen::Quaterniond q;
+  if(grav_align && init){
+    tf::pointEigenToMsg(grav_q * tmp_state.pos, debug_msg.pose.pose.position);
+    q = grav_q * tmp_state.rot;
+    
+  }
+  else{
+    tf::pointEigenToMsg(tmp_state.pos, debug_msg.pose.pose.position);
+    q = Eigen::Quaterniond(tmp_state.rot);
+  }
+  tf::quaternionEigenToMsg(q, debug_msg.pose.pose.orientation);
+  
+  debug_pub.publish(debug_msg);  
+}
 
 void publish_odometry(const ros::Publisher & pubOdomAftMapped)
 {
     odomAftMapped.header.frame_id = "odom";
     odomAftMapped.child_frame_id = "body";
-    odomAftMapped.header.stamp = ros::Time().fromSec(lidar_end_time);
+    odomAftMapped.header.stamp = ros::Time().fromSec(last_update_time);
     set_posestamp(odomAftMapped.pose);
     static tf::TransformBroadcaster br;
     tf::Transform                   transform;
     tf::Quaternion                  q;
+    
     transform.setOrigin(tf::Vector3(odomAftMapped.pose.pose.position.x, \
       odomAftMapped.pose.pose.position.y, \
       odomAftMapped.pose.pose.position.z));
@@ -615,6 +680,8 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
       q.setZ(odomAftMapped.pose.pose.orientation.z);
       transform.setRotation( q );
       br.sendTransform( tf::StampedTransform( transform, odomAftMapped.header.stamp, "camera_init", "body" ) );
+      
+    
     maplab_msgs::OdometryWithImuBiases msg;
     msg.pose = odomAftMapped.pose;
     msg.child_frame_id = imu_frame;
@@ -685,6 +752,7 @@ void publish_odometry(const ros::Publisher & pubOdomAftMapped)
       Eigen::Matrix3d cov_rot;
       if (grav_align) {
         const auto R_g = grav_q.matrix();
+        
         cov_pos = R_g * cov * R_g.transpose();
         cov_rot = R_g * cov_r * R_g.transpose();
       } else {
@@ -758,7 +826,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     for (int i = 0; i < feats_down_size; i++)
     {
         PointType &point_body  = feats_down_body->points[i];
-        PointType &point_world = feats_down_world->points[i];
+        PointType &point_world = feats_down_world->points[i]; // world points for registration
 
         /* transform to world frame */
         V3D p_body(point_body.x, point_body.y, point_body.z);
@@ -766,7 +834,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         point_world.x = p_global(0);
         point_world.y = p_global(1);
         point_world.z = p_global(2);
-        point_world.intensity = point_body.intensity;
+        point_world.intensity = point_body.intensity; // transforming measurement point to world
 
         vector<float> pointSearchSqDis(NUM_MATCH_POINTS);
 
@@ -818,9 +886,9 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
 
 
             MatrixXd centered = nearests.rowwise() - nearests.colwise().mean();
-            MatrixXd cov = centered.adjoint() * centered;
+            MatrixXd cov_local = centered.adjoint() * centered;
 
-            SelfAdjointEigenSolver<MatrixXd> eig(cov);
+            SelfAdjointEigenSolver<MatrixXd> eig(cov_local);
             auto eval = eig.eigenvalues().real();
             double weight = (sqrt(abs(eval(1))) - sqrt(abs(eval(0)))) /
                 sqrt(abs(eval(2)));
@@ -844,7 +912,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     double solve_start_  = omp_get_wtime();
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
-    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23
+    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); // 12 states for rot pos, T_I_L, R_I_L
     ekfom_data.h.resize(effct_feat_num);
 
 
@@ -889,6 +957,108 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     h_x_cash = temp_h;
 }
 
+void h_share_model_ext(state_ikfom &s, esekfom::dyn_share_datastruct_ext<double> &ekfom_data)
+{
+    double solve_start_ = omp_get_wtime();
+
+    // *** Computation of Measuremnt Jacobian matrix H and measurents vector ***
+    ekfom_data.h_x = MatrixXd::Zero(6, 12); //2
+    ekfom_data.h_x.block<6, 6>(0,0) = MatrixXd::Identity(6,6);
+    
+    Eigen::AngleAxisd a_measured = Eigen::AngleAxisd(q_cur_ext_odom);
+    Eigen::AngleAxisd a_measured_prev = Eigen::AngleAxisd(q_ip_ext_odom);
+    Eigen::AngleAxisd a_predicted = Eigen::AngleAxisd(s.rot);
+    Eigen::AngleAxisd a_predicted_prev = Eigen::AngleAxisd(state_backup.rot);
+    
+    /* differential update*/
+    ekfom_data.h.block<3, 1>(0,0) = (p_cur_ext_odom - p_ip_ext_odom) - (s.pos - state_backup.pos);
+    ekfom_data.h.block<3, 1>(3,0) = 
+      (a_measured.angle() * a_measured.axis() 
+         - a_measured_prev.angle() * a_measured_prev.axis()) 
+      - (a_predicted.angle() * a_predicted.axis()
+         - a_predicted_prev.angle() * a_predicted_prev.axis());      
+
+    solve_time += omp_get_wtime() - solve_start_;
+    h_x_cash = ekfom_data.h_x;
+}
+
+void compute_covariances() {
+    // Eigen vector calculation for covariance
+    const auto hth = h_x_cash.leftCols(3).transpose()*h_x_cash.leftCols(3);
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3,3>> eigen(hth);
+    auto eval = eigen.eigenvalues().real();
+    auto diag = Eigen::MatrixXd(3,3);
+    diag.setIdentity();
+    for (auto idx = 0u; idx < 3; ++idx) {
+      diag(idx,idx) = 1./eval(idx);
+    }
+    const Eigen::MatrixXd evec = eigen.eigenvectors().real();
+    cov = evec * diag * evec.transpose();
+    cov = cov / sqrt(eval(0));
+
+    const auto hthr = h_x_cash.leftCols(6).rightCols(3).transpose()*h_x_cash.leftCols(6).rightCols(3);
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3,3>> eigenr(hthr);
+    auto evalr = eigenr.eigenvalues().real();
+    auto diagr = Eigen::MatrixXd(3,3);
+    diagr.setIdentity();
+    for (auto idx = 0u; idx < 3; ++idx) {
+      diagr(idx,idx) = 1./evalr(idx);
+    }
+    const Eigen::MatrixXd evecr = eigenr.eigenvectors().real();
+    cov_r = evecr * diagr * evecr.transpose();
+    cov_r = cov_r / sqrt(evalr(0));
+}
+
+void interpolate_ext_odom_state(double desired_time, 
+    std::deque<geometry_msgs::TransformStamped::ConstPtr>::iterator update_iterator) {
+  // walking backwards through the list starting with the current update  
+  for(auto it = update_iterator; it != ext_odom_buffer.begin(); it--) { // stops at the second last element
+      geometry_msgs::TransformStamped::ConstPtr msg_ptr = *it;
+      geometry_msgs::TransformStamped::ConstPtr msg_ptr_prev = *(it-1);
+
+      double msg_time = msg_ptr->header.stamp.toSec();
+      double msg_time_prev = msg_ptr_prev->header.stamp.toSec();
+    
+      if (msg_time == desired_time) {
+        tf::vectorMsgToEigen(msg_ptr->transform.translation, p_ip_ext_odom);
+        tf::quaternionMsgToEigen(msg_ptr->transform.rotation, q_ip_ext_odom);
+        //ROS_INFO("Found the perfect time %f", msg_time);
+        return;
+      }
+      else if(msg_time > desired_time && msg_time_prev < desired_time) {
+        double fraction = (desired_time - msg_time_prev) 
+                          / (msg_time - msg_time_prev);
+        //ROS_INFO_THROTTLE(10, "IP fraction: %f", fraction);
+        V3D p_prev, p_curr;                  
+        Eigen::Quaterniond q_prev, q_curr;
+        
+        tf::vectorMsgToEigen(msg_ptr_prev->transform.translation, p_prev);
+        tf::quaternionMsgToEigen(msg_ptr_prev->transform.rotation, q_prev);
+        
+        tf::vectorMsgToEigen(msg_ptr->transform.translation, p_curr);
+        tf::quaternionMsgToEigen(msg_ptr->transform.rotation, q_curr);
+        
+        p_ip_ext_odom = p_prev * (1 - fraction) + p_curr * (fraction);   
+        q_ip_ext_odom = q_prev.slerp(fraction, q_curr);
+       
+        return;
+      }
+  }
+  
+  // checking the last msg
+  geometry_msgs::TransformStamped::ConstPtr last_msg = ext_odom_buffer.front();
+  if(desired_time == last_msg->header.stamp.toSec()){
+    //ROS_INFO("Taking oldest available ext_odom msg, (matched the required time)");
+    tf::vectorMsgToEigen(last_msg->transform.translation, p_ip_ext_odom);
+    tf::quaternionMsgToEigen(last_msg->transform.rotation, q_ip_ext_odom);
+    return;
+  }
+  else{
+      ROS_ERROR("desired time is too much in the past! Nothing to IP");
+  }
+  
+}
+
 int main(int argc, char** argv)
 {
     ros::init(argc, argv, "laserMapping");
@@ -904,6 +1074,12 @@ int main(int argc, char** argv)
     nh.param<string>("map_file_path",map_file_path,"");
     nh.param<string>("common/lid_topic",lid_topic,"/livox/lidar");
     nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
+    nh.param<string>("common/ext_odom_topic", ext_odom_topic, "ext_odom");
+
+    nh.param<double>("common/lid_timeout", lid_timeout, 1.0);
+    nh.param<double>("common/ext_odom_cov", ext_odom_cov, 0.000001);
+    
+
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
     nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);
     nh.param<double>("filter_size_surf",filter_size_surf_min,0.5);
@@ -927,6 +1103,7 @@ int main(int argc, char** argv)
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
     nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
+
     cout<<"p_pre->lidar_type "<<p_pre->lidar_type<<endl;
 
     path.header.stamp    = ros::Time::now();
@@ -957,9 +1134,10 @@ int main(int argc, char** argv)
     p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
     p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
 
+
     double epsi[23] = {0.001};
     fill(epsi, epsi+23, 0.001);
-    kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
+    kf.init_dyn_share_multi(get_f, df_dx, df_dw, h_share_model, h_share_model_ext, NUM_MAX_ITERATIONS, epsi);
 
     /*** debug record ***/
     FILE *fp;
@@ -982,6 +1160,8 @@ int main(int argc, char** argv)
     ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>
             ("/Odometry", 100000);
     ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
+    ros::Subscriber sub_ext_odom = nh.subscribe(ext_odom_topic, 200000, ext_odom_cbk);
+
     ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>
             ("/cloud_registered", 100000);
     ros::Publisher pubLaserCloudFull_body = nh.advertise<sensor_msgs::PointCloud2>
@@ -995,6 +1175,9 @@ int main(int argc, char** argv)
             ("/path", 100000);
     maplab_pub = nh.advertise<maplab_msgs::OdometryWithImuBiases>
             ("/fastlio2/odom", 100000);
+            
+    ros::Publisher debug_pub = nh.advertise<nav_msgs::Odometry>
+            ("/debug/odom", 100000);
 //------------------------------------------------------------------------------------------------------
     signal(SIGINT, SigHandle);
     ros::Rate rate(5000);
@@ -1003,12 +1186,11 @@ int main(int argc, char** argv)
     {
         if (flg_exit) break;
         ros::spinOnce();
-        if(sync_packages(Measures))
+        if(prepareLidar(Measures)) // select IMU msgs relevant to propagate
         {
             if (flg_first_scan)
             {
                 first_lidar_time = Measures.lidar_beg_time;
-                p_imu->first_lidar_time = first_lidar_time;
                 flg_first_scan = false;
                 continue;
             }
@@ -1021,8 +1203,9 @@ int main(int argc, char** argv)
             solve_const_H_time = 0;
             svd_time   = 0;
             t0 = omp_get_wtime();
-
-            p_imu->Process(Measures, kf, feats_undistort);
+            
+            p_imu->PropagateState(imu_buffer, kf, lidar_end_time);
+            p_imu->UndistortPcl(Measures, kf, *feats_undistort);
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
@@ -1065,7 +1248,7 @@ int main(int argc, char** argv)
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
-                ROS_WARN("No point, skip this scan!\n");
+                ROS_WARN("Less than 5 points, skip this scan!\n");
                 continue;
             }
 
@@ -1087,7 +1270,6 @@ int main(int argc, char** argv)
             pointSearchInd_surf.resize(feats_down_size);
             Nearest_Points.resize(feats_down_size);
             int  rematch_num = 0;
-            bool nearest_search_en = true; //
 
             t2 = omp_get_wtime();
 
@@ -1095,6 +1277,17 @@ int main(int argc, char** argv)
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+            
+            // keep a backup in case the next pointcloud can not be used
+            update_count++;
+            state_backup = kf.get_x();
+            P_backup = kf.get_P();
+            last_update_time = kf.get_time();
+            flg_state_backup_available = true;
+
+            // empty IMU buffer here until kf_time (lidar_end_time) or lidar_beg_time
+            p_imu->RemoveImuMsgsFromPast(imu_buffer, kf);
+            
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
@@ -1108,31 +1301,7 @@ int main(int argc, char** argv)
 
             const double start_eig = omp_get_wtime();
 
-            {
-              const auto hth = h_x_cash.leftCols(3).transpose()*h_x_cash.leftCols(3);
-              Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3,3>> eigen(hth);
-              auto eval = eigen.eigenvalues().real();
-              auto diag = Eigen::MatrixXd(3,3);
-              diag.setIdentity();
-              for (auto idx = 0u; idx < 3; ++idx) {
-                diag(idx,idx) = 1./eval(idx);
-              }
-              const Eigen::MatrixXd evec = eigen.eigenvectors().real();
-              cov = evec * diag * evec.transpose();
-              cov = cov / sqrt(eval(0));
-
-              const auto hthr = h_x_cash.leftCols(6).rightCols(3).transpose()*h_x_cash.leftCols(6).rightCols(3);
-              Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3,3>> eigenr(hthr);
-              auto evalr = eigenr.eigenvalues().real();
-              auto diagr = Eigen::MatrixXd(3,3);
-              diagr.setIdentity();
-              for (auto idx = 0u; idx < 3; ++idx) {
-                diagr(idx,idx) = 1./evalr(idx);
-              }
-              const Eigen::MatrixXd evecr = eigenr.eigenvectors().real();
-              cov_r = evecr * diagr * evecr.transpose();
-              cov_r = cov_r / sqrt(evalr(0));
-            }
+            compute_covariances();
 
             const double eig_time =  omp_get_wtime() - start_eig;
             // std::cout<<"eig time: "<<eig_time<<std::endl;
@@ -1181,6 +1350,103 @@ int main(int argc, char** argv)
                 <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<<" "<<feats_undistort->points.size()<<endl;
                 dump_lio_state_to_log(fp);
             }
+            
+            if(ext_odom_buffer.size() > ext_odom_buffer_max_size) {
+                // we want to keep the last two!
+                ext_odom_buffer.erase(ext_odom_buffer.begin(), ext_odom_buffer.end() - 2); // erasing all except two
+            }
+        }
+        // if there wasn't a new lidar update for too long
+        else if(!ext_odom_buffer.empty()){
+          if(latest_ext_odom_msg->header.stamp.toSec() - last_timestamp_lidar > lid_timeout){ // TODO parametrize minimal time to update
+            flg_EXT_ODOM_update_required = true;
+            ROS_INFO_ONCE("EXT_ODOM_update required");
+          }
+        }
+
+        // TODO: check imu buffer (so it contains all necessary slots)
+        if(flg_EXT_ODOM_update_required){
+            if(update_count < min_lidar_updates){
+              ROS_INFO_THROTTLE(1,"Not seen enough lidar msgs at startup (update_count %i)", update_count);
+              flg_EXT_ODOM_update_required = false;
+            }
+            else if(ext_odom_buffer.size() < 2){
+              // No new odometry updates
+              //ROS_WARN_THROTTLE(0.5, "Skipping EXT_ODOM update, not enough odometry updates (<2)");
+            }
+            else if(imu_buffer.empty()){
+              ROS_WARN_THROTTLE(0.5, "Skipping EXT_ODOM update, No imu msgs for EXT_ODOM update");
+            }
+            else if(!p_imu->is_initialized())
+            {
+              ROS_WARN_THROTTLE(0.5, "Skipping EXT_ODOM update, Imu state not initialized");
+            }
+            else // do the update(s), all good
+            {
+              double solve_H_time_ext_odom;
+              //ROS_INFO_THROTTLE(0.1,"ext_odom update triggered");
+              // TODO: atm we iterate over all available updates, starting the second
+              for(auto it = ext_odom_buffer.begin() + 1; it != ext_odom_buffer.end(); it++) {
+                //ROS_INFO("Pulling ext_odom update (seen %i lidar updates before)", update_count);
+                double ext_odom_update_time = (*it)->header.stamp.toSec();
+                tf::vectorMsgToEigen((*it)->transform.translation, p_cur_ext_odom);
+                tf::quaternionMsgToEigen((*it)->transform.rotation, q_cur_ext_odom);
+                
+                // check if the timing is matching
+                kf_time = kf.get_time();
+                if(ext_odom_update_time <= last_update_time) {
+                  ROS_INFO("Skip ext_odom update, msg from the past (t_msg = %f)", ext_odom_update_time);
+                  continue;
+                }
+                else if(ext_odom_update_time < kf_time && !flg_state_backup_available) { //check if we predicted to far previously (and if we can reset to earlier time)
+                  ROS_WARN("No state backup, forcing ext_odom update with timing gap (dt = %f)", ext_odom_update_time - kf_time);
+                  continue;
+                }
+                else if(ext_odom_update_time < kf_time && flg_state_backup_available) { // necessary because we might have predicted to far previously
+                  // reset state to the last update predict again
+                  ROS_WARN("KF reset (dt = %f)", ext_odom_update_time - kf_time);
+                  kf.change_x(state_backup);
+                  kf.change_P(P_backup);
+                  kf.set_time(last_update_time); // TODO: FiX THIS!!, troubles with the relative update!
+                }
+                else { 
+                  //Nothing to do, just propagate
+                }
+                // interpolate state for relative update
+                interpolate_ext_odom_state(last_update_time, it);
+                p_imu->PropagateState(imu_buffer, kf, ext_odom_update_time);
+                // perform measurement update
+                kf.update_iterated_dyn_share_modified_ext(ext_odom_cov, solve_H_time_ext_odom); // here the iterated pose estimate is happening
+                
+                // drop imu msgs which we don't need to revisit
+                p_imu->RemoveImuMsgsFromPast(imu_buffer, kf);
+                
+                state_backup = kf.get_x();
+                P_backup = kf.get_P();
+                last_update_time = kf.get_time();
+                flg_state_backup_available = true;
+                
+                state_point = kf.get_x();
+                euler_cur = SO3ToEuler(state_point.rot);
+                pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+                geoQuat.x = state_point.rot.coeffs()[0];
+                geoQuat.y = state_point.rot.coeffs()[1];
+                geoQuat.z = state_point.rot.coeffs()[2];
+                geoQuat.w = state_point.rot.coeffs()[3];
+                
+                compute_covariances();
+
+                //publish_odometry(pubOdomAftMapped);
+                publish_debug_odometry(debug_pub);
+
+              }
+              
+              if(ext_odom_buffer.size() > 1) {
+                  ext_odom_buffer.erase(ext_odom_buffer.begin(), ext_odom_buffer.end() - 1); // we want to keep 2 elements
+              }
+              
+            }
+            flg_EXT_ODOM_update_required = false;
         }
 
         status = ros::ok();

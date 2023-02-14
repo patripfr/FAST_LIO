@@ -1,3 +1,6 @@
+#ifndef PREPROCESS_H
+#define PREPROCESS_H
+
 #include <ros/ros.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/PointCloud2.h>
@@ -142,3 +145,4 @@ class Preprocess
   double smallp_intersect, smallp_ratio;
   double vx, vy, vz;
 };
+#endif

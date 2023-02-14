@@ -88,6 +88,19 @@ struct dyn_share_datastruct
 	Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> R;
 };
 
+// used for external iterated error state EKF update
+// hacky original implementation copied (residual is projected in h)
+template<typename T>
+struct dyn_share_datastruct_ext
+{
+	bool valid;
+	bool converge;
+	Eigen::Matrix<T, 6, 1> h;
+	Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> h_v;
+	Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> h_x;
+	Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> R;
+};
+
 //used for iterated error state EKF update
 //for the aim to calculate  measurement (z), estimate measurement (h), partial differention matrices (h_x, h_v) and the noise covariance (R) at the same time, by only one function.
 //applied for measurement as a dynamic manifold whose dimension or type is changing
@@ -127,6 +140,7 @@ public:
 	typedef Eigen::Matrix<scalar_type, Eigen::Dynamic, 1> measurementModel_dyn(state &, bool &);
 	//typedef Eigen::Matrix<scalar_type, Eigen::Dynamic, 1> measurementModel_dyn_share(state &,  dyn_share_datastruct<scalar_type> &);
 	typedef void measurementModel_dyn_share(state &,  dyn_share_datastruct<scalar_type> &);
+	typedef void measurementModel_dyn_share_ext(state &,  dyn_share_datastruct_ext<scalar_type> &);
 	typedef Eigen::Matrix<scalar_type ,l, n> measurementMatrix1(state &, bool&);
 	typedef Eigen::Matrix<scalar_type , Eigen::Dynamic, n> measurementMatrix1_dyn(state &, bool&);
 	typedef Eigen::Matrix<scalar_type ,l, measurement_noise_dof> measurementMatrix2(state &, bool&);
@@ -253,6 +267,27 @@ public:
 		x_.build_vect_state();
 	}
 
+	//receive system-specific models and their differentions (multiple measurement models)
+	//for measurement as an Eigen matrix whose dimension is changing.
+	//calculate  measurement (z), estimate measurement (h), partial differention matrices (h_x, h_v) and the noise covariance (R) at the same time, by only one function (h_dyn_share_in) depending on the input
+	void init_dyn_share_multi(processModel f_in, processMatrix1 f_x_in, processMatrix2 f_w_in, measurementModel_dyn_share h_dyn_share_in, measurementModel_dyn_share_ext h_dyn_share_ext_in, int maximum_iteration, scalar_type limit_vector[n])
+	{
+		f = f_in;
+		f_x = f_x_in;
+		f_w = f_w_in;
+		h_dyn_share = h_dyn_share_in;
+		h_dyn_share_ext = h_dyn_share_ext_in;
+
+		maximum_iter = maximum_iteration;
+		for(int i=0; i<n; i++)
+		{
+			limit[i] = limit_vector[i];
+		}
+
+		x_.build_S2_state();
+		x_.build_SO3_state();
+		x_.build_vect_state();
+	}
 
 	//receive system-specific models and their differentions
 	//for measurement as a dynamic manifold whose dimension  or type is changing.
@@ -1930,6 +1965,198 @@ public:
 		}
 	}
 
+	// iterative measurement update for a 6x1 odometry update
+	void update_iterated_dyn_share_modified_ext(double R, double &solve_time) {
+		
+		dyn_share_datastruct_ext<scalar_type> dyn_share; // what about this dynamicly shared data struct?
+		dyn_share.valid = true;
+		dyn_share.converge = true;
+		int t = 0;
+		state x_propagated = x_;
+		cov P_propagated = P_;
+		int dof_Measurement;
+		
+		Matrix<scalar_type, n, 1> K_h;
+		Matrix<scalar_type, n, n> K_x; 
+		
+		vectorized_state dx_new = vectorized_state::Zero();
+		for(int i=-1; i<maximum_iter; i++)
+		{
+			dyn_share.valid = true;
+			h_dyn_share_ext(x_, dyn_share);
+
+			if(! dyn_share.valid)
+			{
+				continue; 
+			}
+
+			//Matrix<scalar_type, Eigen::Dynamic, 1> h = h_dyn_share(x_, dyn_share);
+			#ifdef USE_sparse
+				spMt h_x_ = dyn_share.h_x.sparseView();
+			#else
+				Eigen::Matrix<scalar_type, Eigen::Dynamic, 12> h_x_ = dyn_share.h_x;
+			#endif
+			double solve_start = omp_get_wtime();
+			dof_Measurement = h_x_.rows();
+			vectorized_state dx;
+			x_.boxminus(dx, x_propagated);
+			dx_new = dx;
+			
+			P_ = P_propagated;
+			
+			Matrix<scalar_type, 3, 3> res_temp_SO3;
+			MTK::vect<3, scalar_type> seg_SO3;
+			for (std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
+				int idx = (*it).first;
+				int dim = (*it).second;
+				for(int i = 0; i < 3; i++){
+					seg_SO3(i) = dx(idx+i);
+				}
+
+				res_temp_SO3 = MTK::A_matrix(seg_SO3).transpose();
+				dx_new.template block<3, 1>(idx, 0) = res_temp_SO3 * dx_new.template block<3, 1>(idx, 0);
+				for(int i = 0; i < n; i++){
+					P_. template block<3, 1>(idx, i) = res_temp_SO3 * (P_. template block<3, 1>(idx, i));	
+				}
+				for(int i = 0; i < n; i++){
+					P_. template block<1, 3>(i, idx) =(P_. template block<1, 3>(i, idx)) *  res_temp_SO3.transpose();	
+				}
+			}
+
+			Matrix<scalar_type, 2, 2> res_temp_S2;
+			MTK::vect<2, scalar_type> seg_S2;
+			for (std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
+				int idx = (*it).first;
+				int dim = (*it).second;
+				for(int i = 0; i < 2; i++){
+					seg_S2(i) = dx(idx + i);
+				}
+
+				Eigen::Matrix<scalar_type, 2, 3> Nx;
+				Eigen::Matrix<scalar_type, 3, 2> Mx;
+				x_.S2_Nx_yy(Nx, idx);
+				x_propagated.S2_Mx(Mx, seg_S2, idx);
+				res_temp_S2 = Nx * Mx; 
+				dx_new.template block<2, 1>(idx, 0) = res_temp_S2 * dx_new.template block<2, 1>(idx, 0);
+				for(int i = 0; i < n; i++){
+					P_. template block<2, 1>(idx, i) = res_temp_S2 * (P_. template block<2, 1>(idx, i));	
+				}
+				for(int i = 0; i < n; i++){
+					P_. template block<1, 2>(i, idx) = (P_. template block<1, 2>(i, idx)) * res_temp_S2.transpose();
+				}
+			}
+			
+			if(n > dof_Measurement)
+			{
+
+				Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x_cur = Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>::Zero(dof_Measurement, n);
+				h_x_cur.topLeftCorner(dof_Measurement, 12) = h_x_;
+		
+				
+				Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> K_ = P_ * h_x_cur.transpose() * (h_x_cur * P_ * h_x_cur.transpose()/R + Eigen::Matrix<double, Dynamic, Dynamic>::Identity(dof_Measurement, dof_Measurement)).inverse()/R;
+				K_h = K_ * dyn_share.h;
+				K_x = K_ * h_x_cur;
+	
+			}
+			else
+			{
+				cov P_temp = (P_/R).inverse();
+				Eigen::Matrix<scalar_type, 12, 12> HTH = h_x_.transpose() * h_x_; 
+				P_temp. template block<12, 12>(0, 0) += HTH;
+
+				cov P_inv = P_temp.inverse();
+				
+				K_h = P_inv. template block<n, 12>(0, 0) * h_x_.transpose() * dyn_share.h;
+				//cov HTH_cur = cov::Zero();
+				//HTH_cur. template block<12, 12>(0, 0) = HTH;
+				K_x.setZero(); // = cov::Zero();
+				K_x. template block<n, 12>(0, 0) = P_inv. template block<n, 12>(0, 0) * HTH;
+				//K_= (h_x_.transpose() * h_x_ + (P_/R).inverse()).inverse()*h_x_.transpose();
+			}
+
+			//K_x = K_ * h_x_;
+			Matrix<scalar_type, n, 1> dx_ = K_h + (K_x - Matrix<scalar_type, n, n>::Identity()) * dx_new; 
+			state x_before = x_;
+			x_.boxplus(dx_);
+			dyn_share.converge = true;
+			for(int i = 0; i < n ; i++)
+			{
+				if(std::fabs(dx_[i]) > limit[i])
+				{
+					dyn_share.converge = false;
+					break;
+				}
+			}
+			if(dyn_share.converge) t++;
+			
+			if(!t && i == maximum_iter - 2)
+			{
+				dyn_share.converge = true;
+			}
+			// finishing up when convergence is reached?
+			if(t > 1 || i == maximum_iter - 1) // triggers when max iter is reached, or 
+			{
+				L_ = P_;
+				//std::cout << "iteration time" << t << "," << i << std::endl; 
+				Matrix<scalar_type, 3, 3> res_temp_SO3;
+				MTK::vect<3, scalar_type> seg_SO3;
+				for(typename std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
+					int idx = (*it).first;
+					for(int i = 0; i < 3; i++){
+						seg_SO3(i) = dx_(i + idx);
+					}
+					res_temp_SO3 = MTK::A_matrix(seg_SO3).transpose();
+					for(int i = 0; i < n; i++){
+						L_. template block<3, 1>(idx, i) = res_temp_SO3 * (P_. template block<3, 1>(idx, i)); 
+					}
+
+					for(int i = 0; i < 12; i++){
+						K_x. template block<3, 1>(idx, i) = res_temp_SO3 * (K_x. template block<3, 1>(idx, i));
+					}
+
+					for(int i = 0; i < n; i++){
+						L_. template block<1, 3>(i, idx) = (L_. template block<1, 3>(i, idx)) * res_temp_SO3.transpose();
+						P_. template block<1, 3>(i, idx) = (P_. template block<1, 3>(i, idx)) * res_temp_SO3.transpose();
+					}
+				}
+
+				Matrix<scalar_type, 2, 2> res_temp_S2;
+				MTK::vect<2, scalar_type> seg_S2;
+				for(typename std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
+					int idx = (*it).first;
+
+					for(int i = 0; i < 2; i++){
+						seg_S2(i) = dx_(i + idx);
+					}
+
+					Eigen::Matrix<scalar_type, 2, 3> Nx;
+					Eigen::Matrix<scalar_type, 3, 2> Mx;
+					x_.S2_Nx_yy(Nx, idx);
+					x_propagated.S2_Mx(Mx, seg_S2, idx);
+					res_temp_S2 = Nx * Mx; 
+					for(int i = 0; i < n; i++){
+						L_. template block<2, 1>(idx, i) = res_temp_S2 * (P_. template block<2, 1>(idx, i)); 
+					}
+	
+					for(int i = 0; i < 12; i++){
+						K_x. template block<2, 1>(idx, i) = res_temp_S2 * (K_x. template block<2, 1>(idx, i));
+					}
+
+					for(int i = 0; i < n; i++){
+						L_. template block<1, 2>(i, idx) = (L_. template block<1, 2>(i, idx)) * res_temp_S2.transpose();
+						P_. template block<1, 2>(i, idx) = (P_. template block<1, 2>(i, idx)) * res_temp_S2.transpose();
+					}
+				}
+
+
+				P_ = L_ - K_x.template block<n, 12>(0, 0) * P_.template block<12, n>(0, 0);
+				solve_time += omp_get_wtime() - solve_start;
+				return;
+			}
+			solve_time += omp_get_wtime() - solve_start;
+		}
+	}
+
 	void change_x(state &input_state)
 	{
 		x_ = input_state;
@@ -1946,13 +2173,21 @@ public:
 		P_ = input_cov;
 	}
 
-	const state& get_x() const {
+	const state get_x() const {
 		return x_;
 	}
-	const cov& get_P() const {
+	const cov get_P() const {
 		return P_;
 	}
+	
+	const void set_time(double t){
+		time_ = t;
+	}
+	const double& get_time(){
+		return time_;
+	}
 private:
+	double time_;
 	state x_;
 	measurement m_;
 	cov P_;
@@ -1977,6 +2212,7 @@ private:
 
 	measurementModel_share *h_share;
 	measurementModel_dyn_share *h_dyn_share;
+	measurementModel_dyn_share_ext *h_dyn_share_ext;
 
 	int maximum_iter = 0;
 	scalar_type limit[n];
