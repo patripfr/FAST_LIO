@@ -75,7 +75,6 @@ class ImuProcess
 
   PointCloudXYZI::Ptr cur_pcl_un_;
   sensor_msgs::ImuConstPtr last_imu_;
-  //deque<sensor_msgs::ImuConstPtr> v_imu_;
   vector<Pose6D> IMUpose;
 
   M3D Lidar_R_wrt_IMU;
@@ -180,7 +179,7 @@ void ImuProcess::IMU_init(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, esekfom
     mean_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;
   }
 
-  for (const auto &imu : imu_buffer) // Assuming we have enough msgs to fill the N?
+  for (const auto &imu : imu_buffer)
   {
     const auto &imu_acc = imu->linear_acceleration;
     const auto &gyr_acc = imu->angular_velocity;
@@ -222,8 +221,6 @@ void ImuProcess::IMU_init(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, esekfom
 void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, double target_time) // find replacement for measure group!
 {
   if(imu_buffer.empty()) {return;};
-
-  //state_ikfom imu_state = kf_state.get_x();
     
   if (imu_need_init_)
   {
@@ -237,9 +234,19 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
 
       cov_acc = cov_acc_scale;
       cov_gyr = cov_gyr_scale;
-      ROS_INFO("IMU Initial Done");
-      // ROS_INFO("IMU Initial Done: Gravity: %.4f %.4f %.4f %.4f; state.bias_g: %.4f %.4f %.4f; acc covarience: %.8f %.8f %.8f; gry covarience: %.8f %.8f %.8f",\
-      //          imu_state.grav[0], imu_state.grav[1], imu_state.grav[2], mean_acc.norm(), cov_bias_gyr[0], cov_bias_gyr[1], cov_bias_gyr[2], cov_acc[0], cov_acc[1], cov_acc[2], cov_gyr[0], cov_gyr[1], cov_gyr[2]);
+      ROS_INFO("IMU initialized");
+      /*
+      ROS_INFO("IMU Initial Done: 
+        Gravity: %.4f %.4f %.4f %.4f; 
+        state.bias_g: %.4f %.4f %.4f; 
+        acc covarience: %.8f %.8f %.8f; 
+        gry covarience: %.8f %.8f %.8f",\
+        imu_state.grav[0], imu_state.grav[1], imu_state.grav[2], 
+        mean_acc.norm(), 
+        cov_bias_gyr[0], cov_bias_gyr[1], cov_bias_gyr[2], 
+        cov_acc[0], cov_acc[1], cov_acc[2], 
+        cov_gyr[0], cov_gyr[1], cov_gyr[2]);
+      */
       fout_imu.open(DEBUG_FILE_DIR("imu.txt"),ios::out);
     }
 
@@ -259,13 +266,8 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
   {
     auto &&head = *(it_imu);
     auto &&tail = *(it_imu + 1);
-    
-    // Not used atm because we predict until exact target time
-    //if(tail->header.stamp.toSec() > target_time) {
-    //  return;
-    //}
 
-    // this only makes sense for the next else condition (**)
+    // this only makes sense for the next else state (**)
     angvel_avr<<0.5 * (head->angular_velocity.x + tail->angular_velocity.x),
                 0.5 * (head->angular_velocity.y + tail->angular_velocity.y),
                 0.5 * (head->angular_velocity.z + tail->angular_velocity.z);
@@ -273,8 +275,7 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
                 0.5 * (head->linear_acceleration.y + tail->linear_acceleration.y),
                 0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z); 
                 
-    // TODO: this should be dt dependand (0.5 only holds for the prediction within 2 imu frames)
-
+    // TODO: this could be dt dependand (0.5 only holds for the prediction within 2 imu frames, but errors are tiny)
     // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
 
     acc_avr = acc_avr * G_m_s2 / mean_acc.norm(); // - state_inout.ba;
@@ -284,21 +285,23 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
       return;
     }
     else if(head->header.stamp.toSec() < last_kf_update_time && 
-       tail->header.stamp.toSec() < last_kf_update_time) // old data 
+       tail->header.stamp.toSec() < last_kf_update_time) 
     {
+      // old data imu data
       skip_counter++;
       ROS_WARN_THROTTLE(0.5, "KF prediction stamp ahead of imu stamp, skipping msg (%i in a row)", skip_counter);
-      it_imu += 1; // this line is VERY important
+      it_imu += 1;
       continue;
     }
     else if(head->header.stamp.toSec() < last_kf_update_time && 
             tail->header.stamp.toSec() > last_kf_update_time)
     {
-      dt = tail->header.stamp.toSec() - last_kf_update_time; // closing the gap to the next IMU update
-      //ROS_INFO("Closing the gap: dt = %f", dt);
+      // closing the gap to the next IMU update
+      dt = tail->header.stamp.toSec() - last_kf_update_time;
     }
     else if(head->header.stamp.toSec() < target_time && 
-      tail->header.stamp.toSec() > target_time) { // precisely matching the target time
+      tail->header.stamp.toSec() > target_time) { 
+      // precisely matching the target time
       dt = target_time - head->header.stamp.toSec();
     }
     else // head < target time && tail < target_time (**)
@@ -323,7 +326,7 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
     kf_state.predict(dt, Q, in);
 
     /* save the poses at each IMU measurements */
-    state_ikfom imu_state = kf_state.get_x(); // overwriting imu_state after every propagation step
+    const state_ikfom &imu_state = kf_state.get_x();
     angvel_last = angvel_avr - imu_state.bg;
     acc_s_last  = imu_state.rot * (acc_avr - imu_state.ba);
     for(int i=0; i<3; i++)
@@ -331,15 +334,14 @@ void ImuProcess::PropagateState(deque<sensor_msgs::Imu::ConstPtr> &imu_buffer, e
       acc_s_last[i] += imu_state.grav[i];
     }
     
-    double &&t = head->header.stamp.toSec() + dt; // && creates temporaries without making a copy, WTF why here?
+    double &&t = head->header.stamp.toSec() + dt; // && -> creates temporary object without making a copy
     IMUpose.push_back(set_pose6d(t, acc_s_last, angvel_last, imu_state.vel, imu_state.pos, imu_state.rot.toRotationMatrix()));
     kf_state.set_time(t);
     
     // remove head element and set the pointer one further
-    //it_imu = imu_buffer.erase(it_imu); // how shall we keep this while not erasing it all?
     it_imu += 1;
     
-    if(t >= target_time){ // TODO integrate this more nicely
+    if(t >= target_time){
       break;
     }
   }
@@ -349,11 +351,12 @@ void ImuProcess::RemoveImuMsgsFromPast(deque<sensor_msgs::Imu::ConstPtr> &imu_bu
   auto it_imu = imu_buffer.begin();
   double kf_time = kf_state.get_time();
   
-  while(it_imu < (imu_buffer.end() - 1)) // we always want to keep the last msg for interpolation with the next one!
+  // always keep the last msg for interpolation in the next prediction!
+  while(it_imu < (imu_buffer.end() - 1)) 
   {
     auto &&msg = *(it_imu);
     
-    double msg_time = msg->header.stamp.toSec(); // make sure the we keep the last one before the
+    double msg_time = msg->header.stamp.toSec();
     if (msg_time > kf_time){
       break;
     }
@@ -366,7 +369,6 @@ void ImuProcess::RemoveImuMsgsFromPast(deque<sensor_msgs::Imu::ConstPtr> &imu_bu
 void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_out)
 {
   /*** add the imu of the last frame-tail to the of current frame-head ***/
-
   const double &pcl_beg_time = meas.lidar_beg_time;
   const double &pcl_end_time = meas.lidar_end_time;
   
@@ -378,9 +380,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   
   if(IMUpose.front().time > pcl_beg_time){
     ROS_WARN("IMUpose.front().time > pcl_beg_time");
-    ROS_WARN("IMUpose.front: %f", IMUpose.front().time);
-    ROS_WARN("PCL beg time:  %f", pcl_beg_time);
-    ROS_WARN("PCL end time:  %f", pcl_end_time);
+    //ROS_WARN("IMUpose.front: %f", IMUpose.front().time);
+    //ROS_WARN("PCL beg time:  %f", pcl_beg_time);
+    //ROS_WARN("PCL end time:  %f", pcl_end_time);
   }
   
   /*** calculated the pos and attitude prediction at the frame-end ***/
@@ -388,17 +390,14 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   double note = pcl_end_time >= last_kf_update_time ? 1.0 : -1.0;
   if (note == -1.0) {
     ROS_WARN("last_kf_update_time > pcl_end_time:");
-    ROS_WARN("PCL end: %f", pcl_end_time);
-    ROS_WARN("KF end:  %f", last_kf_update_time);
+    //ROS_WARN("PCL end: %f", pcl_end_time);
+    //ROS_WARN("KF end:  %f", last_kf_update_time);
   }
   
   double dt = note * (pcl_end_time - last_kf_update_time);
   //ROS_INFO_THROTTLE(1,"dt KF to pcl_end time: %f", dt);
 
-  //kf_state.predict(dt, Q, in);
-
-  state_ikfom imu_state = kf_state.get_x(); // TODO might propagate to the last state?
-  //last_imu_ = IMUpose.back(); // most current imu measurement (within the lidar measurement window)
+  state_ikfom imu_state = kf_state.get_x();
   last_lidar_end_time = pcl_end_time;
 
   /*** sort point clouds by offset time ***/

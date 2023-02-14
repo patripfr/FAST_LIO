@@ -88,9 +88,8 @@ struct dyn_share_datastruct
 	Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> R;
 };
 
-//used for iterated error state EKF update
-//for the aim to calculate  measurement (z), estimate measurement (h), partial differention matrices (h_x, h_v) and the noise covariance (R) at the same time, by only one function.
-//applied for measurement as an Eigen matrix whose dimension is changing
+// used for external iterated error state EKF update
+// hacky original implementation copied (residual is projected in h)
 template<typename T>
 struct dyn_share_datastruct_ext
 {
@@ -268,9 +267,9 @@ public:
 		x_.build_vect_state();
 	}
 
-	//receive system-specific models and their differentions
+	//receive system-specific models and their differentions (multiple measurement models)
 	//for measurement as an Eigen matrix whose dimension is changing.
-	//calculate  measurement (z), estimate measurement (h), partial differention matrices (h_x, h_v) and the noise covariance (R) at the same time, by only one function (h_dyn_share_in).
+	//calculate  measurement (z), estimate measurement (h), partial differention matrices (h_x, h_v) and the noise covariance (R) at the same time, by only one function (h_dyn_share_in) depending on the input
 	void init_dyn_share_multi(processModel f_in, processMatrix1 f_x_in, processMatrix2 f_w_in, measurementModel_dyn_share h_dyn_share_in, measurementModel_dyn_share_ext h_dyn_share_ext_in, int maximum_iteration, scalar_type limit_vector[n])
 	{
 		f = f_in;
@@ -1966,7 +1965,7 @@ public:
 		}
 	}
 
-
+	// iterative measurement update for a 6x1 odometry update
 	void update_iterated_dyn_share_modified_ext(double R, double &solve_time) {
 		
 		dyn_share_datastruct_ext<scalar_type> dyn_share; // what about this dynamicly shared data struct?
